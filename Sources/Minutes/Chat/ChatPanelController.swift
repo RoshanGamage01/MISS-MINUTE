@@ -26,16 +26,17 @@ final class ChatPanelController {
             let root = ChatPanelView().environmentObject(appModel)
             let hosting = NSHostingView(rootView: root)
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 360, height: 460),
-                styleMask: [.titled, .closable, .fullSizeContentView],
+                contentRect: NSRect(x: 0, y: 0, width: 400, height: 600),
+                styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
                 backing: .buffered,
                 defer: false
             )
-            window.title = "Minutes"
+            window.title = "Miss Minute"
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
             window.isOpaque = false
-            window.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96)
+            window.backgroundColor = NSColor(red: 0.08, green: 0.05, blue: 0.03, alpha: 0.97)
+            window.minSize = NSSize(width: 360, height: 480)
             window.isReleasedWhenClosed = false
             window.level = .floating
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]

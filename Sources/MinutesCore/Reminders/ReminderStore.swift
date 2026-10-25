@@ -35,11 +35,25 @@ public final class ReminderStore: ObservableObject {
         await persist()
     }
 
-    public func add(text: String, fireAt: Date) async {
+    @discardableResult
+    public func add(text: String, fireAt: Date) async -> Reminder {
         let reminder = Reminder(text: text, fireAt: fireAt)
         reminders.append(reminder)
         reminders.sort { $0.fireAt < $1.fireAt }
         await persist()
+        return reminder
+    }
+
+    public var upcoming: [Reminder] {
+        reminders.filter { !$0.isFired }
+    }
+
+    /// Finds a pending reminder by short ID or text match.
+    public func find(_ reference: String) -> Reminder? {
+        let ref = reference.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !ref.isEmpty else { return nil }
+        return upcoming.first(where: { $0.shortID == ref })
+            ?? upcoming.first(where: { $0.text.lowercased().contains(ref) })
     }
 
     public func remove(id: UUID) async {

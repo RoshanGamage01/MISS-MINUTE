@@ -72,3 +72,8 @@ public struct KeychainAPIKeyProvider: APIKeyProviding, Sendable {
         }
     }
 }
+
+/// Keychain accounts for secrets that aren't chat-provider keys.
+public enum SecretAccount {
+    public static let elevenLabs = "minutes.voice.elevenlabs.apiKey"
+}

@@ -8,8 +8,8 @@ cd "$ROOT"
 
 APP_NAME="Minutes"
 BUNDLE_ID="com.minutes.app"
-VERSION="${VERSION:-1.0.0}"
-BUILD_NUMBER="${BUILD_NUMBER:-1}"
+VERSION="${VERSION:-2.1.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-3}"
 CONFIG="${CONFIG:-release}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"   # e.g. "Developer ID Application: Your Name (TEAMID)"
 MAKE_DMG="${MAKE_DMG:-0}"
@@ -65,7 +65,7 @@ else
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>
-  <string>13.0</string>
+  <string>14.0</string>
   <key>LSUIElement</key>
   <true/>
 </dict>

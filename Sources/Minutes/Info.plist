@@ -12,18 +12,28 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>Minutes</string>
+	<key>CFBundleDisplayName</key>
+	<string>Miss Minute</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>2.1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>13.0</string>
+	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Miss Minute listens when you push to talk so you can speak to her.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Miss Minute turns what you say into text so she can help you.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Miss Minute reads your schedule for briefings and adds events when you ask.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Miss Minute opens apps and runs your Shortcuts when you ask.</string>
 	<key>NSUserNotificationAlertStyle</key>
 	<string>alert</string>
 </dict>

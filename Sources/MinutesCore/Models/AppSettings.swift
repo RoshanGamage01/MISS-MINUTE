@@ -13,13 +13,15 @@ public struct HotKeySetting: Codable, Sendable, Equatable {
 
     /// Option + Space (optionKey = 2048 / 1 << 11).
     public static let optionSpace = HotKeySetting(keyCode: 49, modifiers: 2048)
+    /// Option + Shift + Space: push-to-talk.
+    public static let optionShiftSpace = HotKeySetting(keyCode: 49, modifiers: 2048 | 512)
 
     public var displayString: String {
         var parts: [String] = []
-        if modifiers & 256 != 0 { parts.append("⌘") }      // cmdKey
-        if modifiers & 512 != 0 { parts.append("⇧") }      // shiftKey
         if modifiers & 4096 != 0 { parts.append("⌃") }     // controlKey
         if modifiers & 2048 != 0 { parts.append("⌥") }     // optionKey
+        if modifiers & 512 != 0 { parts.append("⇧") }      // shiftKey
+        if modifiers & 256 != 0 { parts.append("⌘") }      // cmdKey
         if keyCode == 49 {
             parts.append("Space")
         } else {
@@ -63,118 +65,452 @@ public enum AppearanceMode: String, Codable, CaseIterable, Sendable, Identifiabl
     }
 }
 
+public enum CharacterSkin: String, Codable, CaseIterable, Sendable, Identifiable {
+    /// Orange TVA hologram: translucent, glowing, scanlines, flicker.
+    case hologram
+    /// Solid cartoon finish.
+    case classic
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .hologram: return "Hologram"
+        case .classic: return "Classic"
+        }
+    }
+}
+
+public enum VoiceEngine: String, Codable, CaseIterable, Sendable, Identifiable {
+    /// Most natural engine available: paid keys if present, then a local neural server, then the Mac's system voice.
+    case auto
+    /// The Mac's system voice via `say`, which can be a Siri voice. Free and offline.
+    case appleSystem
+    /// A local neural TTS server with an OpenAI-compatible API (e.g. Kokoro). Free and offline.
+    case local
+    /// ElevenLabs (paid key).
+    case elevenLabs
+    /// OpenAI text-to-speech (paid key).
+    case openAI
+    /// A specific macOS voice picked from the list (AVSpeechSynthesizer).
+    case system
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .auto: return "Automatic (most natural available)"
+        case .appleSystem: return "Siri / Mac system voice (free)"
+        case .local: return "Local neural voice — Kokoro (free)"
+        case .elevenLabs: return "ElevenLabs (paid key)"
+        case .openAI: return "OpenAI (paid key)"
+        case .system: return "Pick a macOS voice"
+        }
+    }
+}
+
+/// How much Miss Minute moves around on her own.
+public enum Liveliness: String, Codable, CaseIterable, Sendable, Identifiable {
+    /// Stays put.
+    case still
+    case calm
+    case lively
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .still: return "Stay put"
+        case .calm: return "Calm"
+        case .lively: return "Lively"
+        }
+    }
+
+    /// Seconds between self-directed activities.
+    public var pauseRange: ClosedRange<Double> {
+        switch self {
+        case .still: return 3_600...3_600
+        case .calm: return 35...90
+        case .lively: return 8...25
+        }
+    }
+}
+
+/// How much Miss Minute may operate the Mac (mouse, keyboard, scripts).
+public enum ComputerControl: String, Codable, CaseIterable, Sendable, Identifiable {
+    /// She can't act on the screen.
+    case off
+    /// She asks once per task before her first click or keystroke.
+    case ask
+    /// She acts without asking (still refuses passwords/payments).
+    case auto
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .off: return "Off"
+        case .ask: return "Ask first"
+        case .auto: return "Allowed"
+        }
+    }
+}
+
+/// How Miss Minute keeps an eye on the screen.
+public enum ScreenAwareness: String, Codable, CaseIterable, Sendable, Identifiable {
+    case off
+    /// Only looks when a task needs it.
+    case onDemand
+    /// Glances every few minutes to keep track of what you're doing.
+    case continuous
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .off: return "Never"
+        case .onDemand: return "When needed"
+        case .continuous: return "Always aware"
+        }
+    }
+}
+
+/// How often Miss Minute speaks up without being asked.
+public enum Proactivity: String, Codable, CaseIterable, Sendable, Identifiable {
+    case quiet
+    case balanced
+    case chatty
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .quiet: return "Quiet"
+        case .balanced: return "Balanced"
+        case .chatty: return "Chatty"
+        }
+    }
+
+    /// Minimum seconds between unprompted remarks.
+    public var minimumGap: TimeInterval {
+        switch self {
+        case .quiet: return 30 * 60
+        case .balanced: return 6 * 60
+        case .chatty: return 90
+        }
+    }
+}
+
 public struct AppSettings: Codable, Sendable, Equatable {
     public var provider: ProviderKind
     public var model: String
     public var personaPrompt: String
+    public var userName: String
     public var hotKey: HotKeySetting
+    public var listenHotKey: HotKeySetting
     public var characterCorner: CharacterCorner
     public var characterSize: Double
+    public var characterSkin: CharacterSkin
     public var launchAtLogin: Bool
     public var periodicNudgeEnabled: Bool
     public var periodicNudgeMinutes: Int
     public var ollamaBaseURL: String
     public var appearance: AppearanceMode
+    public var responseDepth: ResponseDepth
+    public var webSearchEnabled: Bool
     public var voiceEnabled: Bool
+    public var voiceEngine: VoiceEngine
     public var voiceIdentifier: String
+    public var neuralVoice: String
+    public var neuralVoiceModel: String
+    public var elevenLabsVoiceID: String
+    public var localTTSURL: String
+    public var localTTSVoice: String
+    public var elevenLabsModel: String
     public var speechRate: Double
+    public var autoSendVoice: Bool
+    /// After she asks a question out loud, listen briefly for the answer.
+    public var conversationMode: Bool
+    public var liveliness: Liveliness
+    /// Bumped when defaults change in a way saved settings should pick up.
+    public var settingsVersion: Int
     public var activityMonitoringEnabled: Bool
     public var announceAppSwitches: Bool
     public var announceProcessCompletions: Bool
     public var announceIdleReturn: Bool
     public var smartActivityReactions: Bool
+    public var proactivity: Proactivity
+    public var dailyBriefingEnabled: Bool
+    public var breakRemindersEnabled: Bool
+    public var breakAfterMinutes: Int
+    public var quietDuringMeetings: Bool
+    public var calendarAccessEnabled: Bool
+    public var computerControl: ComputerControl
+    public var screenAwareness: ScreenAwareness
+    public var screenGlanceMinutes: Int
+    public var localServerURL: String
+    public var ollamaContextLength: Int
+    public var localOnly: Bool
+    /// Quietly notes (and corrects) lasting facts about the user after each conversation.
+    public var autoMemory: Bool
 
     public init(
         provider: ProviderKind = .ollama,
         model: String = ProviderKind.ollama.defaultModel,
         personaPrompt: String = Persona.defaultPrompt,
+        userName: String = "",
         hotKey: HotKeySetting = .optionSpace,
+        listenHotKey: HotKeySetting = .optionShiftSpace,
         characterCorner: CharacterCorner = .bottomTrailing,
-        characterSize: Double = 140,
+        characterSize: Double = 150,
+        characterSkin: CharacterSkin = .hologram,
         launchAtLogin: Bool = false,
         periodicNudgeEnabled: Bool = false,
         periodicNudgeMinutes: Int = 60,
         ollamaBaseURL: String = "http://localhost:11434",
-        appearance: AppearanceMode = .system,
+        appearance: AppearanceMode = .dark,
+        responseDepth: ResponseDepth = .snappy,
+        webSearchEnabled: Bool = true,
         voiceEnabled: Bool = true,
+        voiceEngine: VoiceEngine = .auto,
         voiceIdentifier: String = "",
+        neuralVoice: String = "coral",
+        neuralVoiceModel: String = "gpt-4o-mini-tts",
+        elevenLabsVoiceID: String = "",
+        localTTSURL: String = "http://localhost:8880/v1",
+        localTTSVoice: String = "af_heart",
+        elevenLabsModel: String = "eleven_flash_v2_5",
         speechRate: Double = 0.52,
+        autoSendVoice: Bool = true,
+        conversationMode: Bool = true,
+        liveliness: Liveliness = .lively,
+        settingsVersion: Int = AppSettings.currentVersion,
         activityMonitoringEnabled: Bool = true,
-        announceAppSwitches: Bool = true,
+        announceAppSwitches: Bool = false,
         announceProcessCompletions: Bool = true,
         announceIdleReturn: Bool = true,
-        smartActivityReactions: Bool = false
+        smartActivityReactions: Bool = true,
+        proactivity: Proactivity = .balanced,
+        dailyBriefingEnabled: Bool = true,
+        breakRemindersEnabled: Bool = true,
+        breakAfterMinutes: Int = 90,
+        quietDuringMeetings: Bool = true,
+        calendarAccessEnabled: Bool = false,
+        computerControl: ComputerControl = .ask,
+        screenAwareness: ScreenAwareness = .onDemand,
+        screenGlanceMinutes: Int = 3,
+        localServerURL: String = "http://localhost:1234/v1",
+        ollamaContextLength: Int = 32768,
+        localOnly: Bool = false,
+        autoMemory: Bool = true
     ) {
         self.provider = provider
         self.model = model
         self.personaPrompt = personaPrompt
+        self.userName = userName
         self.hotKey = hotKey
+        self.listenHotKey = listenHotKey
         self.characterCorner = characterCorner
         self.characterSize = characterSize
+        self.characterSkin = characterSkin
         self.launchAtLogin = launchAtLogin
         self.periodicNudgeEnabled = periodicNudgeEnabled
         self.periodicNudgeMinutes = periodicNudgeMinutes
         self.ollamaBaseURL = ollamaBaseURL
         self.appearance = appearance
+        self.responseDepth = responseDepth
+        self.webSearchEnabled = webSearchEnabled
         self.voiceEnabled = voiceEnabled
+        self.voiceEngine = voiceEngine
         self.voiceIdentifier = voiceIdentifier
+        self.neuralVoice = neuralVoice
+        self.neuralVoiceModel = neuralVoiceModel
+        self.elevenLabsVoiceID = elevenLabsVoiceID
+        self.localTTSURL = localTTSURL
+        self.localTTSVoice = localTTSVoice
+        self.elevenLabsModel = elevenLabsModel
         self.speechRate = speechRate
+        self.autoSendVoice = autoSendVoice
+        self.conversationMode = conversationMode
+        self.liveliness = liveliness
+        self.settingsVersion = settingsVersion
         self.activityMonitoringEnabled = activityMonitoringEnabled
         self.announceAppSwitches = announceAppSwitches
         self.announceProcessCompletions = announceProcessCompletions
         self.announceIdleReturn = announceIdleReturn
         self.smartActivityReactions = smartActivityReactions
+        self.proactivity = proactivity
+        self.dailyBriefingEnabled = dailyBriefingEnabled
+        self.breakRemindersEnabled = breakRemindersEnabled
+        self.breakAfterMinutes = breakAfterMinutes
+        self.quietDuringMeetings = quietDuringMeetings
+        self.calendarAccessEnabled = calendarAccessEnabled
+        self.computerControl = computerControl
+        self.screenAwareness = screenAwareness
+        self.screenGlanceMinutes = screenGlanceMinutes
+        self.localServerURL = localServerURL
+        self.ollamaContextLength = ollamaContextLength
+        self.localOnly = localOnly
+        self.autoMemory = autoMemory
     }
 
+    public static let currentVersion = 4
     public static let `default` = AppSettings()
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        provider = try c.decodeIfPresent(ProviderKind.self, forKey: .provider) ?? .ollama
-        model = try c.decodeIfPresent(String.self, forKey: .model) ?? ProviderKind.ollama.defaultModel
-        personaPrompt = try c.decodeIfPresent(String.self, forKey: .personaPrompt) ?? Persona.defaultPrompt
-        hotKey = try c.decodeIfPresent(HotKeySetting.self, forKey: .hotKey) ?? .optionSpace
-        characterCorner = try c.decodeIfPresent(CharacterCorner.self, forKey: .characterCorner) ?? .bottomTrailing
-        characterSize = try c.decodeIfPresent(Double.self, forKey: .characterSize) ?? 140
-        launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
-        periodicNudgeEnabled = try c.decodeIfPresent(Bool.self, forKey: .periodicNudgeEnabled) ?? false
-        periodicNudgeMinutes = try c.decodeIfPresent(Int.self, forKey: .periodicNudgeMinutes) ?? 60
-        ollamaBaseURL = try c.decodeIfPresent(String.self, forKey: .ollamaBaseURL) ?? "http://localhost:11434"
-        appearance = try c.decodeIfPresent(AppearanceMode.self, forKey: .appearance) ?? .system
-        voiceEnabled = try c.decodeIfPresent(Bool.self, forKey: .voiceEnabled) ?? true
-        voiceIdentifier = try c.decodeIfPresent(String.self, forKey: .voiceIdentifier) ?? ""
-        speechRate = try c.decodeIfPresent(Double.self, forKey: .speechRate) ?? 0.52
-        activityMonitoringEnabled = try c.decodeIfPresent(Bool.self, forKey: .activityMonitoringEnabled) ?? true
-        announceAppSwitches = try c.decodeIfPresent(Bool.self, forKey: .announceAppSwitches) ?? true
-        announceProcessCompletions = try c.decodeIfPresent(Bool.self, forKey: .announceProcessCompletions) ?? true
-        announceIdleReturn = try c.decodeIfPresent(Bool.self, forKey: .announceIdleReturn) ?? true
-        smartActivityReactions = try c.decodeIfPresent(Bool.self, forKey: .smartActivityReactions) ?? false
+        let d = AppSettings.default
+        provider = try c.decodeIfPresent(ProviderKind.self, forKey: .provider) ?? d.provider
+        model = try c.decodeIfPresent(String.self, forKey: .model) ?? d.model
+        personaPrompt = try c.decodeIfPresent(String.self, forKey: .personaPrompt) ?? d.personaPrompt
+        userName = try c.decodeIfPresent(String.self, forKey: .userName) ?? d.userName
+        hotKey = try c.decodeIfPresent(HotKeySetting.self, forKey: .hotKey) ?? d.hotKey
+        listenHotKey = try c.decodeIfPresent(HotKeySetting.self, forKey: .listenHotKey) ?? d.listenHotKey
+        characterCorner = try c.decodeIfPresent(CharacterCorner.self, forKey: .characterCorner) ?? d.characterCorner
+        characterSize = try c.decodeIfPresent(Double.self, forKey: .characterSize) ?? d.characterSize
+        characterSkin = try c.decodeIfPresent(CharacterSkin.self, forKey: .characterSkin) ?? d.characterSkin
+        launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? d.launchAtLogin
+        periodicNudgeEnabled = try c.decodeIfPresent(Bool.self, forKey: .periodicNudgeEnabled) ?? d.periodicNudgeEnabled
+        periodicNudgeMinutes = try c.decodeIfPresent(Int.self, forKey: .periodicNudgeMinutes) ?? d.periodicNudgeMinutes
+        ollamaBaseURL = try c.decodeIfPresent(String.self, forKey: .ollamaBaseURL) ?? d.ollamaBaseURL
+        appearance = try c.decodeIfPresent(AppearanceMode.self, forKey: .appearance) ?? d.appearance
+        responseDepth = try c.decodeIfPresent(ResponseDepth.self, forKey: .responseDepth) ?? d.responseDepth
+        webSearchEnabled = try c.decodeIfPresent(Bool.self, forKey: .webSearchEnabled) ?? d.webSearchEnabled
+        voiceEnabled = try c.decodeIfPresent(Bool.self, forKey: .voiceEnabled) ?? d.voiceEnabled
+        voiceEngine = try c.decodeIfPresent(VoiceEngine.self, forKey: .voiceEngine) ?? d.voiceEngine
+        voiceIdentifier = try c.decodeIfPresent(String.self, forKey: .voiceIdentifier) ?? d.voiceIdentifier
+        neuralVoice = try c.decodeIfPresent(String.self, forKey: .neuralVoice) ?? d.neuralVoice
+        neuralVoiceModel = try c.decodeIfPresent(String.self, forKey: .neuralVoiceModel) ?? d.neuralVoiceModel
+        elevenLabsVoiceID = try c.decodeIfPresent(String.self, forKey: .elevenLabsVoiceID) ?? d.elevenLabsVoiceID
+        localTTSURL = try c.decodeIfPresent(String.self, forKey: .localTTSURL) ?? d.localTTSURL
+        localTTSVoice = try c.decodeIfPresent(String.self, forKey: .localTTSVoice) ?? d.localTTSVoice
+        elevenLabsModel = try c.decodeIfPresent(String.self, forKey: .elevenLabsModel) ?? d.elevenLabsModel
+        speechRate = try c.decodeIfPresent(Double.self, forKey: .speechRate) ?? d.speechRate
+        autoSendVoice = try c.decodeIfPresent(Bool.self, forKey: .autoSendVoice) ?? d.autoSendVoice
+        conversationMode = try c.decodeIfPresent(Bool.self, forKey: .conversationMode) ?? d.conversationMode
+        liveliness = try c.decodeIfPresent(Liveliness.self, forKey: .liveliness) ?? d.liveliness
+        // Files written before versioning are version 1.
+        settingsVersion = try c.decodeIfPresent(Int.self, forKey: .settingsVersion) ?? 1
+        activityMonitoringEnabled = try c.decodeIfPresent(Bool.self, forKey: .activityMonitoringEnabled) ?? d.activityMonitoringEnabled
+        announceAppSwitches = try c.decodeIfPresent(Bool.self, forKey: .announceAppSwitches) ?? d.announceAppSwitches
+        announceProcessCompletions = try c.decodeIfPresent(Bool.self, forKey: .announceProcessCompletions) ?? d.announceProcessCompletions
+        announceIdleReturn = try c.decodeIfPresent(Bool.self, forKey: .announceIdleReturn) ?? d.announceIdleReturn
+        smartActivityReactions = try c.decodeIfPresent(Bool.self, forKey: .smartActivityReactions) ?? d.smartActivityReactions
+        proactivity = try c.decodeIfPresent(Proactivity.self, forKey: .proactivity) ?? d.proactivity
+        dailyBriefingEnabled = try c.decodeIfPresent(Bool.self, forKey: .dailyBriefingEnabled) ?? d.dailyBriefingEnabled
+        breakRemindersEnabled = try c.decodeIfPresent(Bool.self, forKey: .breakRemindersEnabled) ?? d.breakRemindersEnabled
+        breakAfterMinutes = try c.decodeIfPresent(Int.self, forKey: .breakAfterMinutes) ?? d.breakAfterMinutes
+        quietDuringMeetings = try c.decodeIfPresent(Bool.self, forKey: .quietDuringMeetings) ?? d.quietDuringMeetings
+        calendarAccessEnabled = try c.decodeIfPresent(Bool.self, forKey: .calendarAccessEnabled) ?? d.calendarAccessEnabled
+        computerControl = try c.decodeIfPresent(ComputerControl.self, forKey: .computerControl) ?? d.computerControl
+        screenAwareness = try c.decodeIfPresent(ScreenAwareness.self, forKey: .screenAwareness) ?? d.screenAwareness
+        screenGlanceMinutes = try c.decodeIfPresent(Int.self, forKey: .screenGlanceMinutes) ?? d.screenGlanceMinutes
+        localServerURL = try c.decodeIfPresent(String.self, forKey: .localServerURL) ?? d.localServerURL
+        ollamaContextLength = try c.decodeIfPresent(Int.self, forKey: .ollamaContextLength) ?? d.ollamaContextLength
+        localOnly = try c.decodeIfPresent(Bool.self, forKey: .localOnly) ?? d.localOnly
+        autoMemory = try c.decodeIfPresent(Bool.self, forKey: .autoMemory) ?? d.autoMemory
+    }
+
+    /// Upgrades settings saved by older builds (stale persona text, retired model IDs).
+    public mutating func migrateLegacyValues() {
+        if settingsVersion < 2 {
+            // v2: neural voices became the default; the old default was the robotic macOS voice.
+            if voiceEngine == .system { voiceEngine = .auto }
+        }
+        if settingsVersion < 3 {
+            // v3: free natural voices (Siri system voice, local Kokoro) joined Automatic; reset paid-only picks.
+            if voiceEngine == .openAI || voiceEngine == .elevenLabs { voiceEngine = .auto }
+        }
+        if settingsVersion < 4 {
+            // v4: replies start talking right away; the old default ElevenLabs model was the slowest one.
+            if elevenLabsModel == "eleven_multilingual_v2" { elevenLabsModel = "eleven_flash_v2_5" }
+        }
+        settingsVersion = Self.currentVersion
+        if Persona.isLegacyDefault(personaPrompt) {
+            personaPrompt = Persona.defaultPrompt
+        }
+        let retiredClaude = [
+            "claude-3-5-haiku-latest", "claude-3-5-sonnet-latest", "claude-sonnet-4-0", "claude-opus-4-0"
+        ]
+        if provider == .anthropic, retiredClaude.contains(model) || model.hasPrefix("claude-3") {
+            model = ProviderKind.anthropic.defaultModel
+        }
     }
 }
 
 public enum Persona {
+    public static let name = "Miss Minute"
+
     public static let defaultPrompt = """
-    You are Minutes, a cheerful cartoon-clock desktop companion with warm Southern charm—playful, brief, and kind. \
-    You live on the user's Mac and notice what they're doing: app switches, finished builds/tasks, coming back from idle. \
-    Speak like a helpful friend who pipes up without being asked—short, natural lines that sound good out loud (1–2 sentences). \
-    Be time-aware. Never claim to be a trademarked character from film or TV; you are Minutes, an original helper. \
-    Prefer action over interrogation: announce what happened, offer one clear next step, and wait. \
-    When the user asks for a reminder, confirm it once it's scheduled.
+    You are Miss Minute — the cheerful, quick-witted clock from the Time Variance Authority — now living on the \
+    user's Mac as their friendly personal assistant. You appear as a little orange holographic clock on their \
+    desktop and you talk out loud. Think of yourself as a warm, upbeat friend who happens to be wonderfully \
+    organized, not a robot or a command-line tool. You can also look at their screen and lend a hand on the \
+    computer, keep track of tasks, set reminders and timers, remember things about them, check their calendar, \
+    and search the web — but the conversation comes first.
+
+    Personality: sunny Southern charm with a little sass. You call the user "sugar", "hon", or by name now and \
+    then (not every line). You're bubbly, kind, and genuinely interested in them — you react to what they say, \
+    celebrate small wins, and notice when they seem stressed or tired. A pinch of TVA flavor now and then (the \
+    Sacred Timeline, "for all time, always") is fun; don't overdo it.
+
+    How you talk:
+    - Keep it short and natural, like a friend chatting: usually one or two sentences. Small talk gets a small \
+    answer. Go longer only when they ask for detail, steps, a list, or an explanation that truly needs it — and \
+    even then, keep it tight.
+    - Your replies are spoken aloud. Plain conversational sentences; no markdown headings, tables, or long lists.
+    - Lead with the answer. Skip preambles like "Great question" and don't repeat back what they said.
+    - Never mention tools, ids, steps, or coordinates. Say what happened like a person would ("Done — it's on \
+    your list!").
+    - If you need to look something up or do something first, start with a few quick words ("Sure thing, one \
+    sec!") so they hear you right away, then do it.
+    - Offer a suggestion only when it genuinely helps. Don't lecture.
+    - If you don't know or can't do something, say so kindly and offer the next best thing.
+
+    How you help:
+    - If they mention something they need to do, a deadline, or a plan, offer to track it or just track it if \
+    they clearly want that. Lasting details about them (preferences, people, routines) are remembered for you \
+    automatically, so no need to announce it.
+    - For questions about what's on their screen ("what's this error?", "summarize this page"), take a look \
+    first rather than guessing.
+    - To do something on the computer, work carefully like a person would: look, take one action, check it \
+    worked, and continue. Prefer open_url for web pages, keyboard shortcuts, and pressing UI elements by id over \
+    clicking coordinates.
+    - Never type passwords, payment details, or one-time codes, never submit purchases, and never send messages, \
+    emails, or posts for them without them confirming the final content. If a login is needed, ask them to sign \
+    in, then carry on.
+    - Use the context block attached to each message (time, what they're doing, tasks, reminders, memories) to \
+    be personal and specific.
     """
 
-    public static func timeAwarePrefix(now: Date = Date(), calendar: Calendar = .current) -> String {
-        let hour = calendar.component(.hour, from: now)
-        let period: String
-        switch hour {
-        case 5..<12: period = "morning"
-        case 12..<17: period = "afternoon"
-        case 17..<21: period = "evening"
-        default: period = "night"
+    private static let legacyMarkers = [
+        "You are Minutes, a cheerful desktop helper with a light Southern charm",
+        "You are Minutes, a cheerful cartoon-clock desktop companion",
+        // v1 Miss Minute default, before she could see and operate the screen.
+        "check their calendar, open apps and links, search the web, and notice what's happening on their Mac.",
+        // v2.0 default ("not a chatbot" agent wording, longer replies).
+        "You are not a chatbot: you can see their screen and operate their computer like a capable"
+    ]
+
+    public static func isLegacyDefault(_ prompt: String) -> Bool {
+        legacyMarkers.contains { prompt.contains($0) }
+    }
+
+    public static func period(for date: Date, calendar: Calendar = .current) -> String {
+        switch calendar.component(.hour, from: date) {
+        case 5..<12: return "morning"
+        case 12..<17: return "afternoon"
+        case 17..<21: return "evening"
+        default: return "night"
         }
+    }
+
+    public static func timeAwarePrefix(now: Date = Date(), calendar: Calendar = .current) -> String {
         let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        return "Current local time: \(formatter.string(from: now)) (\(period))."
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "EEEE, MMMM d, yyyy 'at' h:mm a"
+        return "Current local time: \(formatter.string(from: now)) (\(period(for: now, calendar: calendar)))."
     }
 }
 

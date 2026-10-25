@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import MinutesCore
 
@@ -19,18 +20,17 @@ struct MinutesApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: StatusItemController?
     private var characterController: CharacterWindowController?
+    private var bubbleController: SpeechBubbleController?
     private var chatController: ChatPanelController?
     private var settingsController: SettingsWindowController?
-    private var hotKeyMonitor: HotKeyMonitor?
+    private let hotKeyMonitor = HotKeyMonitor()
     private var notificationManager: NotificationManager?
+    private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
         let model = AppModel.shared
-        Task {
-            await model.bootstrap()
-        }
 
         notificationManager = NotificationManager(appModel: model)
         notificationManager?.requestAuthorization()
@@ -38,21 +38,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         characterController = CharacterWindowController(appModel: model)
         characterController?.show()
 
+        let bubble = SpeechBubbleController()
+        bubble.anchorFrame = { [weak self] in self?.characterController?.windowFrame }
+        bubble.onClick = { [weak self] in self?.showChat() }
+        bubbleController = bubble
+        characterController?.onMoved = { [weak bubble] in bubble?.layout() }
+
+        // Her own life: wandering, perching on windows, napping, reacting.
+        let behavior = model.behavior
+        behavior.frame = { [weak self] in self?.characterController?.windowFrame }
+        behavior.setOrigin = { [weak self] origin in self?.characterController?.setOrigin(origin) }
+        behavior.characterSize = { CGFloat(model.settingsStore.settings.characterSize) }
+        behavior.settings = { model.settingsStore.settings }
+        behavior.isEngaged = { [weak self] in
+            (self?.chatController?.isVisible ?? false)
+                || model.chatService.isStreaming
+                || model.voiceInput.isListening
+                || model.speech.isSpeaking
+        }
+        behavior.onRemark = { [weak self] line, speak in
+            self?.bubbleController?.show(line)
+            if speak { model.speech.speak(line) }
+        }
+        characterController?.onDragBegan = { behavior.dragBegan() }
+        characterController?.onDragEnded = { behavior.dragEnded() }
+        characterController?.onHover = { behavior.hoverChanged($0) }
+        behavior.start()
+
         chatController = ChatPanelController(appModel: model)
         settingsController = SettingsWindowController(appModel: model)
 
         statusItemController = StatusItemController(
             onOpenChat: { [weak self] in self?.toggleChat() },
+            onTalk: { AppModel.shared.toggleListening() },
+            onBrief: { AppModel.shared.briefMeNow() },
             onOpenSettings: { [weak self] in self?.openSettings() },
             onQuit: { NSApp.terminate(nil) }
         )
 
-        hotKeyMonitor = HotKeyMonitor(settings: { AppModel.shared.settingsStore.settings.hotKey }) {
-            Task { @MainActor in
-                AppModel.shared.toggleChatRequested()
-            }
+        hotKeyMonitor.add(id: 1, setting: { AppModel.shared.settingsStore.settings.hotKey }) {
+            AppModel.shared.toggleChatRequested()
         }
-        hotKeyMonitor?.register()
+        hotKeyMonitor.add(id: 2, setting: { AppModel.shared.settingsStore.settings.listenHotKey }) {
+            AppModel.shared.toggleListening()
+        }
+        // ⌥Esc: emergency stop for anything she's doing on screen.
+        hotKeyMonitor.add(id: 3, setting: { HotKeySetting(keyCode: 53, modifiers: 2048) }) {
+            AppModel.shared.stopEverything()
+        }
+
+        // While she drives the mouse and keyboard, get her own windows out of the way.
+        model.computer.onBeginActing = { [weak self] in self?.setActingMode(true) }
+        model.computer.onEndActing = { [weak self] in self?.setActingMode(false) }
 
         model.onToggleChat = { [weak self] in
             self?.toggleChat()
@@ -62,9 +99,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         model.onCharacterPositionChanged = { [weak self] in
             self?.characterController?.reposition()
+            model.behavior.resetHome()
         }
         model.onHotKeyChanged = { [weak self] in
-            self?.hotKeyMonitor?.register()
+            self?.hotKeyMonitor.register()
         }
         model.onReminderFired = { [weak self] reminder in
             self?.notificationManager?.deliver(reminder: reminder)
@@ -73,15 +111,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.onProactiveAlert = { [weak self] in
             self?.characterController?.flashAnnounce()
         }
+        model.onBubble = { [weak self] text in
+            self?.bubbleController?.show(text)
+        }
+        model.$liveTranscript
+            .removeDuplicates()
+            .sink { [weak self] text in self?.bubbleController?.showListening(text) }
+            .store(in: &cancellables)
 
         characterController?.onCharacterClicked = { [weak self] in
+            model.behavior.clicked()
             self?.toggleChat()
+        }
+
+        Task {
+            await model.bootstrap()
+            // Hotkeys read settings, so register after they're loaded.
+            self.hotKeyMonitor.register()
+        }
+    }
+
+    private var chatWasOpenBeforeActing = false
+
+    private func setActingMode(_ acting: Bool) {
+        characterController?.setClickThrough(acting)
+        bubbleController?.setClickThrough(acting)
+        if acting {
+            chatWasOpenBeforeActing = chatController?.isVisible ?? false
+            if chatWasOpenBeforeActing { chatController?.hide() }
+            bubbleController?.show("On it — I'm usin' your Mac now. Press ⌥Esc to stop me.")
+        } else if chatWasOpenBeforeActing {
+            chatWasOpenBeforeActing = false
+            chatController?.show(near: characterController?.windowFrame)
         }
     }
 
     private func toggleChat() {
+        bubbleController?.hide()
         chatController?.toggle(near: characterController?.windowFrame)
-        characterController?.setChatOpen(chatController?.isVisible ?? false)
+    }
+
+    private func showChat() {
+        guard chatController?.isVisible != true else { return }
+        toggleChat()
     }
 
     private func openSettings() {

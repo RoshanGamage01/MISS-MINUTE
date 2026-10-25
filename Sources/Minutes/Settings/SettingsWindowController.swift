@@ -16,12 +16,12 @@ final class SettingsWindowController {
             let root = SettingsRootView().environmentObject(appModel)
             let hosting = NSHostingView(rootView: root)
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 520, height: 620),
+                contentRect: NSRect(x: 0, y: 0, width: 600, height: 680),
                 styleMask: [.titled, .closable, .miniaturizable],
                 backing: .buffered,
                 defer: false
             )
-            window.title = "Minutes Settings"
+            window.title = "Miss Minute Settings"
             window.isReleasedWhenClosed = false
             window.contentView = hosting
             self.window = window
@@ -37,11 +37,13 @@ struct SettingsRootView: View {
     var body: some View {
         TabView {
             ProviderSettingsView()
-                .tabItem { Label("Provider", systemImage: "cpu") }
+                .tabItem { Label("Brain", systemImage: "brain") }
+            ComputerSettingsView()
+                .tabItem { Label("Computer", systemImage: "desktopcomputer") }
             PersonaSettingsView()
-                .tabItem { Label("Persona", systemImage: "text.bubble") }
+                .tabItem { Label("Persona", systemImage: "person.crop.circle") }
             VoiceSettingsView()
-                .tabItem { Label("Voice", systemImage: "speaker.wave.2") }
+                .tabItem { Label("Voice", systemImage: "waveform") }
             AwarenessSettingsView()
                 .tabItem { Label("Awareness", systemImage: "eye") }
             CharacterSettingsView()
@@ -52,7 +54,7 @@ struct SettingsRootView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
         }
         .padding(16)
-        .frame(minWidth: 520, minHeight: 560)
+        .frame(minWidth: 580, minHeight: 620)
         .environmentObject(appModel)
         .preferredColorScheme(
             MinutesTheme.preferredColorScheme(for: appModel.settingsStore.settings.appearance)

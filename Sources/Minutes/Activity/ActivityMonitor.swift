@@ -7,11 +7,13 @@ import MinutesCore
 @MainActor
 final class ActivityMonitor {
     var onEvent: ((ActivityEvent) -> Void)?
+    /// Receives focus/idle bookkeeping (screen time, time without a break).
+    var usage: UsageTracker?
 
     private var settingsProvider: () -> AppSettings = { .default }
     private var timer: Timer?
     private var lastFrontAppID: String?
-    private var lastAppAnnounceAt: Date = .distantPast
+    private var isIdle = false
     private var trackedJobs: [Int32: TrackedJob] = [:]
     private var idlePeakSeconds: TimeInterval = 0
     private var observers: [NSObjectProtocol] = []
@@ -38,7 +40,9 @@ final class ActivityMonitor {
         guard !started else { return }
         started = true
 
-        lastFrontAppID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let front = NSWorkspace.shared.frontmostApplication
+        lastFrontAppID = front?.bundleIdentifier
+        if let name = front?.localizedName { usage?.appDidActivate(name) }
 
         let workspace = NSWorkspace.shared.notificationCenter
         observers.append(workspace.addObserver(
@@ -93,24 +97,31 @@ final class ActivityMonitor {
 
     private func handleAppActivation(_ note: Notification) {
         let settings = settingsProvider()
-        guard settings.activityMonitoringEnabled, settings.announceAppSwitches else { return }
+        guard settings.activityMonitoringEnabled else { return }
         guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
         let bundleID = app.bundleIdentifier ?? ""
         if bundleID == Bundle.main.bundleIdentifier { return }
         if bundleID == lastFrontAppID { return }
         lastFrontAppID = bundleID
 
-        // Debounce rapid switching.
-        guard Date().timeIntervalSince(lastAppAnnounceAt) > 50 else { return }
-        lastAppAnnounceAt = Date()
-
         let name = app.localizedName ?? "another app"
+        usage?.appDidActivate(name)
+        // The proactive engine decides whether this is worth a remark.
         emit(.appActivated(name: name, bundleID: bundleID))
     }
 
     private func refreshIdleState(settings: AppSettings) {
-        guard settings.announceIdleReturn else { return }
         let idle = SystemIdle.idleSeconds()
+        // Five quiet minutes counts as a break for screen-time purposes.
+        if idle >= 5 * 60, !isIdle {
+            isIdle = true
+            usage?.userWentIdle(idleSince: Date().addingTimeInterval(-idle))
+        } else if idle < 5, isIdle {
+            isIdle = false
+            usage?.userReturned()
+        }
+        Task { await usage?.tick() }
+
         if idle >= 15 * 60 {
             idlePeakSeconds = max(idlePeakSeconds, idle)
             return

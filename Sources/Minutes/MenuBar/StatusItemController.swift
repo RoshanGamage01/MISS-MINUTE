@@ -7,6 +7,8 @@ final class StatusItemController {
 
     init(
         onOpenChat: @escaping () -> Void,
+        onTalk: @escaping () -> Void,
+        onBrief: @escaping () -> Void,
         onOpenSettings: @escaping () -> Void,
         onQuit: @escaping () -> Void
     ) {
@@ -14,17 +16,17 @@ final class StatusItemController {
         if let button = item.button {
             button.image = Self.makeClockImage()
             button.imagePosition = .imageOnly
-            button.toolTip = "Minutes"
+            button.toolTip = "Miss Minute"
         }
 
         let menu = NSMenu()
-        let openChat = menu.addItem(withTitle: "Open Chat", action: nil, keyEquivalent: "")
-        openChat.setHandler(onOpenChat)
-        let settings = menu.addItem(withTitle: "Settings…", action: nil, keyEquivalent: ",")
-        settings.setHandler(onOpenSettings)
+        menu.addItem(withTitle: "Talk to Miss Minute", action: nil, keyEquivalent: "").setHandler(onTalk)
+        menu.addItem(withTitle: "Open Chat", action: nil, keyEquivalent: "").setHandler(onOpenChat)
+        menu.addItem(withTitle: "Brief Me", action: nil, keyEquivalent: "").setHandler(onBrief)
         menu.addItem(.separator())
-        let quit = menu.addItem(withTitle: "Quit Minutes", action: nil, keyEquivalent: "q")
-        quit.setHandler(onQuit)
+        menu.addItem(withTitle: "Settings…", action: nil, keyEquivalent: ",").setHandler(onOpenSettings)
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Quit Miss Minute", action: nil, keyEquivalent: "q").setHandler(onQuit)
         item.menu = menu
         statusItem = item
     }
@@ -32,23 +34,28 @@ final class StatusItemController {
     private static func makeClockImage() -> NSImage {
         let size = NSSize(width: 18, height: 18)
         let image = NSImage(size: size, flipped: false) { rect in
-            let inset = rect.insetBy(dx: 1.5, dy: 1.5)
             NSColor.labelColor.setStroke()
-            let circle = NSBezierPath(ovalIn: inset)
+            NSColor.labelColor.setFill()
+            // Face
+            let face = rect.insetBy(dx: 2, dy: 2).offsetBy(dx: 0, dy: -1)
+            let circle = NSBezierPath(ovalIn: face)
             circle.lineWidth = 1.5
             circle.stroke()
-            let center = CGPoint(x: rect.midX, y: rect.midY)
-            let hand = NSBezierPath()
-            hand.move(to: center)
-            hand.line(to: CGPoint(x: center.x, y: inset.maxY - 2))
-            hand.lineWidth = 1.5
-            hand.lineCapStyle = .round
-            hand.stroke()
-            let minute = NSBezierPath()
-            minute.move(to: center)
-            minute.line(to: CGPoint(x: inset.maxX - 3, y: center.y + 2))
-            minute.lineWidth = 1.2
-            minute.stroke()
+            // Crown knob
+            NSBezierPath(roundedRect: NSRect(x: rect.midX - 2, y: face.maxY - 0.5, width: 4, height: 2.5), xRadius: 1, yRadius: 1).fill()
+            // Eyes
+            for dx in [-2.6, 2.6] as [CGFloat] {
+                NSBezierPath(ovalIn: NSRect(x: face.midX + dx - 1, y: face.midY + 0.6, width: 2, height: 2.6)).fill()
+            }
+            // Smile
+            let smile = NSBezierPath()
+            smile.move(to: CGPoint(x: face.midX - 3, y: face.midY - 2))
+            smile.curve(to: CGPoint(x: face.midX + 3, y: face.midY - 2),
+                        controlPoint1: CGPoint(x: face.midX - 1.5, y: face.midY - 4.2),
+                        controlPoint2: CGPoint(x: face.midX + 1.5, y: face.midY - 4.2))
+            smile.lineWidth = 1.2
+            smile.lineCapStyle = .round
+            smile.stroke()
             return true
         }
         image.isTemplate = true

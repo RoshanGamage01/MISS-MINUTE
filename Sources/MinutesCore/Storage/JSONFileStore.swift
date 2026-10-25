@@ -50,4 +50,16 @@ public enum MinutesPaths {
     public static var remindersURL: URL {
         applicationSupport.appendingPathComponent("reminders.json")
     }
+
+    public static var tasksURL: URL {
+        applicationSupport.appendingPathComponent("tasks.json")
+    }
+
+    public static var memoryURL: URL {
+        applicationSupport.appendingPathComponent("memory.json")
+    }
+
+    public static var usageURL: URL {
+        applicationSupport.appendingPathComponent("usage.json")
+    }
 }

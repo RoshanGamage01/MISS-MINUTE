@@ -31,7 +31,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     func deliver(reminder: Reminder) {
         guard isAvailable else { return }
         let content = UNMutableNotificationContent()
-        content.title = "Minutes"
+        content.title = "Miss Minute"
         content.body = reminder.text
         content.sound = .default
 

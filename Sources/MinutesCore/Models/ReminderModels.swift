@@ -23,6 +23,8 @@ public struct Reminder: Codable, Sendable, Equatable, Identifiable {
         self.isFired = isFired
         self.sourcePhrase = sourcePhrase
     }
+
+    public var shortID: String { String(id.uuidString.prefix(6)).lowercased() }
 }
 
 public struct ParsedReminder: Sendable, Equatable {
