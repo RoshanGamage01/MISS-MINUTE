@@ -5,14 +5,22 @@ import MinutesCore
 @MainActor
 final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     private weak var appModel: AppModel?
+    /// UserNotifications requires a real `.app` bundle; raw `swift run` binaries crash otherwise.
+    private let isAvailable: Bool
 
     init(appModel: AppModel) {
         self.appModel = appModel
+        self.isAvailable = Self.runningInsideAppBundle
         super.init()
+        guard isAvailable else {
+            print("Minutes: notifications disabled (run via Minutes.app, not a bare binary).")
+            return
+        }
         UNUserNotificationCenter.current().delegate = self
     }
 
     func requestAuthorization() {
+        guard isAvailable else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, error in
             if let error {
                 print("Notification auth error: \(error.localizedDescription)")
@@ -21,6 +29,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     }
 
     func deliver(reminder: Reminder) {
+        guard isAvailable else { return }
         let content = UNMutableNotificationContent()
         content.title = "Minutes"
         content.body = reminder.text
@@ -40,5 +49,9 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
         completionHandler([.banner, .sound])
+    }
+
+    private static var runningInsideAppBundle: Bool {
+        Bundle.main.bundleURL.pathExtension.lowercased() == "app"
     }
 }

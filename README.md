@@ -34,14 +34,10 @@ Scripts/
 ```bash
 swift build
 swift test                     # MinutesCore unit tests
-./Scripts/run-dev.sh           # launches the accessory app
+./Scripts/run-dev.sh           # packages a debug .app and launches it
 ```
 
-Or:
-
-```bash
-swift run Minutes
-```
+`run-dev.sh` builds into `.build/dev/Minutes.app` and runs that binary. **Do not** use bare `swift run Minutes` for day-to-day use — `UserNotifications` crashes outside a real `.app` bundle (`bundleProxyForCurrentProcess is nil`).
 
 You should see a menu-bar clock icon and a floating character. Click the character or press **⌥Space** to open chat. Use the menu-bar item for **Settings** / **Quit**.
 
