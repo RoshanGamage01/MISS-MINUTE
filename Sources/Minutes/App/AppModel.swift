@@ -46,15 +46,16 @@ final class AppModel: ObservableObject {
         reminderStore.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
-        chatService.objectWillChange
-            .sink { [weak self] _ in self?.objectWillChange.send() }
-            .store(in: &cancellables)
     }
 
     func bootstrap() async {
         await settingsStore.load()
         await reminderStore.load()
         await chatService.load()
+
+        chatService.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
 
         chatService.onReminderParsed = { [weak self] parsed in
             Task { @MainActor in
