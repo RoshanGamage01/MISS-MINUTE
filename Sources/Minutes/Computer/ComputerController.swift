@@ -4,7 +4,7 @@ import MinutesCore
 /// Lets Miss Minute see and operate the Mac: screenshots, reading UI, mouse, keyboard, browser, and AppleScript.
 ///
 /// Observing needs Screen Recording (screenshots) or Accessibility (UI text). Acting needs Accessibility and is
-/// gated by the Computer Control setting: Off, Ask first (once per task), or Allowed.
+/// gated by the Computer Control setting: Off, Ask first (once per task), or On her own.
 @MainActor
 final class ComputerController {
     let reader = AccessibilityReader()
@@ -390,7 +390,12 @@ enum BrowserBridge {
 
     /// Needs "Allow JavaScript from Apple Events" (Chrome: View → Developer; Safari: Develop menu).
     static func pageText(_ browser: String) throws -> String {
-        let js = "document.body.innerText"
+        try runJavaScript("document.body.innerText", in: browser)
+    }
+
+    /// Runs JavaScript in the active tab. `js` must not contain double quotes.
+    @discardableResult
+    static func runJavaScript(_ js: String, in browser: String) throws -> String {
         let script = browser == "Safari"
             ? "tell application \"Safari\" to do JavaScript \"\(js)\" in current tab of front window"
             : "tell application \"\(browser)\" to execute active tab of front window javascript \"\(js)\""

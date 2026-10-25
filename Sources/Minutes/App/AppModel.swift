@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 import MinutesCore
@@ -17,10 +18,12 @@ final class AppModel: ObservableObject {
     let keychain = MacKeychainStore(service: "com.minutes.app")
     let speech = SpeechManager.shared
     let voiceInput = VoiceInputManager()
+    let wakeWord = WakeWordListener()
     let activityMonitor = ActivityMonitor()
     let tools = ToolRegistry()
     let behavior = BehaviorEngine()
     let computer = ComputerController()
+    let coding = CodingAgentRunner()
     private(set) lazy var screenWatcher = ScreenWatcher(computer: computer)
     lazy var apiKeys = KeychainAPIKeyProvider(keychain: keychain)
     private(set) lazy var proactive = ProactiveEngine(
@@ -65,6 +68,11 @@ final class AppModel: ObservableObject {
     var onProactiveAlert: (() -> Void)?
     /// Show a line in the speech bubble next to Miss Minute.
     var onBubble: ((String) -> Void)?
+
+    /// Her read on how the user is doing; sets the tone of replies, the voice, and the body.
+    private(set) var mood = MoodTracker()
+    /// The user's latest words, for pulling up related memories.
+    private var lastUserText: String?
 
     /// The last message was spoken, so a spoken question back deserves a listening ear.
     private var lastInputWasSpoken = false
@@ -114,8 +122,19 @@ final class AppModel: ObservableObject {
             self?.chatService.conversation.messages.last(where: { $0.role == .user })?.content
         }
         tools.register(computer.tools())
+        tools.register(WorkTools.all(settings: { [weak self] in self?.settingsStore.settings ?? .default }, coding: coding))
+        // A finished build comes back to her for QA, without waiting on the user.
+        coding.onFinished = { [weak self] job in
+            self?.chatService.continueWork(CodingAgentRunner.followUpNote(for: job))
+        }
         chatService.onTurnEnded = { [weak self] in self?.computer.endTask() }
+        chatService.onWillSend = { [weak self] in self?.speech.prewarm() }
+        chatService.onUserMessage = { [weak self] text in
+            self?.mood.observeUserText(text)
+            self?.lastUserText = text
+        }
         chatService.onExchangeCompleted = { [weak self] userText, reply, toolsUsed in
+            if toolsUsed.contains("complete_task") { self?.mood.observe(.taskCompleted) }
             self?.updateMemories(userText: userText, reply: reply, toolsUsed: toolsUsed)
         }
 
@@ -129,12 +148,14 @@ final class AppModel: ObservableObject {
             return self.chatService.isStreaming || self.voiceInput.isListening || self.speech.isSpeaking || self.proactive.inMeeting
         }
         screenWatcher.onOffer = { [weak self] line in self?.proactive.offer(line) }
+        screenWatcher.onNote = { [weak self] note in self?.proactive.noteScreen(note) }
         screenWatcher.start()
 
         speech.configure(
             settingsProvider: { [weak self] in self?.settingsStore.settings ?? .default },
             secret: { [weak self] account in self?.secret(account) }
         )
+        speech.toneProvider = { [weak self] in self?.currentTone() ?? .steady }
         speech.onFinishedSpeaking = { [weak self] said in
             self?.listenForAnswerIfAsked(said)
         }
@@ -163,11 +184,14 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             if listening {
                 self.speech.stop()
+                // She'll be answering in a moment: get the model and voice ready while the user talks.
+                self.prewarm()
                 self.chatService.mood = .listening
             } else if self.chatService.mood == .listening {
                 self.chatService.mood = .idle
             }
             if !listening { self.liveTranscript = nil }
+            self.wakeWord.refresh()
         }
         voiceInput.$transcript
             .sink { [weak self] text in
@@ -178,6 +202,8 @@ final class AppModel: ObservableObject {
         voiceInput.onFinal = { [weak self] text in
             self?.chatService.send(text, inputMode: "spoken")
         }
+        chatService.acknowledgeSpokenRequests = { [weak self] in self?.settingsStore.settings.voiceEnabled ?? false }
+        configureWakeWord()
 
         activityMonitor.configure(settingsProvider: { [weak self] in
             self?.settingsStore.settings ?? .default
@@ -185,6 +211,11 @@ final class AppModel: ObservableObject {
         activityMonitor.usage = usage
         activityMonitor.onEvent = { [weak self] event in
             self?.latestActivitySummary = event.summary
+            switch event {
+            case .processFinished: self?.mood.observe(.jobFinished)
+            case .returnedFromIdle(let minutes) where minutes >= 5: self?.mood.observe(.breakTaken)
+            default: break
+            }
             self?.proactive.handle(event)
         }
         if settingsStore.settings.activityMonitoringEnabled {
@@ -194,6 +225,10 @@ final class AppModel: ObservableObject {
         proactive.deliver = { [weak self] prompt, fallback, _ in
             self?.speakUp(prompt: prompt, fallback: fallback)
         }
+        proactive.frontWindow = { [weak self] in self?.computer.frontSummary() ?? (nil, nil) }
+        proactive.isStressed = { [weak self] in self?.mood.isStressed() ?? false }
+        proactive.onMoodSignal = { [weak self] signal in self?.mood.observe(signal) }
+        proactive.onSuspectedError = { [weak self] in self?.screenWatcher.glanceSoon() }
         let willBrief = proactive.briefingDue
         proactive.start()
         if !willBrief {
@@ -234,6 +269,55 @@ final class AppModel: ObservableObject {
         Task { await voiceInput.start(noSpeechTimeout: 6) }
     }
 
+    // MARK: - "Hey Minute"
+
+    private func configureWakeWord() {
+        wakeWord.canListen = { [weak self] in
+            guard let self else { return false }
+            return self.settingsStore.settings.wakeWordEnabled && !self.speech.isSpeaking
+                && !self.voiceInput.isListening && !self.proactive.inMeeting
+        }
+        wakeWord.onPartial = { [weak self] text in
+            guard let self else { return }
+            if let text {
+                if self.chatService.mood != .listening {
+                    self.chatService.mood = .listening
+                    self.prewarm()
+                }
+                self.liveTranscript = text.isEmpty ? "…" : text
+            } else {
+                self.liveTranscript = nil
+                if self.chatService.mood == .listening { self.chatService.mood = .idle }
+            }
+        }
+        wakeWord.onCommand = { [weak self] text, spokeAt in
+            guard let self else { return }
+            let trace = LatencyTrace.shared
+            trace.begin(origin: "wake", at: spokeAt)
+            trace.mark(.speechEnded, at: spokeAt)
+            trace.mark(.sttFinal)
+            self.chatService.send(text, inputMode: "spoken")
+        }
+        wakeWord.onWakeOnly = { [weak self] in
+            guard let self else { return }
+            // Just "Hey Minute": a soft chime and the mic opens for the request.
+            NSSound(named: "Tink")?.play()
+            Task { await self.voiceInput.start(noSpeechTimeout: 6) }
+        }
+        // She mustn't hear herself: pause while speaking, resume after.
+        speech.$isSpeaking
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.wakeWord.refresh() }
+            }
+            .store(in: &cancellables)
+        // Calls starting/ending and settings changes.
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.wakeWord.refresh() }
+        }
+        wakeWord.refresh()
+    }
+
     /// Keeps memories current in the background after each conversation turn.
     private func updateMemories(userText: String, reply: String, toolsUsed: [String]) {
         let settings = settingsStore.settings
@@ -248,7 +332,30 @@ final class AppModel: ObservableObject {
     func warmUpModel() {
         let settings = settingsStore.settings
         guard settings.provider == .ollama, let provider = try? makeProvider() as? OllamaProvider else { return }
+        lastModelWarmUp = Date()
         Task { await provider.warmUp(model: settings.model) }
+    }
+
+    private var lastModelWarmUp: Date = .distantPast
+    private var lastConnectionWarmUp: Date = .distantPast
+
+    /// A reply is likely soon (mic opened, chat opened): make sure nothing is cold when it comes. Reloads an
+    /// Ollama model that idled out, opens the TLS connection to a cloud model, and warms the voice.
+    func prewarm() {
+        speech.prewarm()
+        let settings = settingsStore.settings
+        if settings.provider == .ollama {
+            if Date().timeIntervalSince(lastModelWarmUp) > 60 { warmUpModel() }
+            return
+        }
+        guard Date().timeIntervalSince(lastConnectionWarmUp) > 20, let host = settings.provider.apiHost else { return }
+        lastConnectionWarmUp = Date()
+        Task {
+            var request = URLRequest(url: host)
+            request.httpMethod = "HEAD"
+            request.timeoutInterval = 5
+            _ = try? await URLSession.shared.data(for: request)
+        }
     }
 
     func makeProvider() throws -> any ChatProvider {
@@ -283,12 +390,19 @@ final class AppModel: ObservableObject {
             openTasks: taskStore.openTasks,
             upcomingReminders: reminderStore.upcoming,
             calendarLines: calendar.upcomingLines(),
-            memories: memoryStore.contextLines(),
-            inputMode: inputMode
+            memories: memoryStore.contextLines(query: lastUserText),
+            inputMode: inputMode,
+            moodNote: currentTone(at: now).guidance
         ).render()
     }
 
+    /// How she should come across right now, from the user's recent words and how long they've been at it.
+    func currentTone(at now: Date = Date()) -> MoodTone {
+        mood.tone(at: now, activeMinutes: usage.continuousActiveMinutes(at: now))
+    }
+
     func toggleChatRequested() {
+        if !chatPanelOpen { prewarm() }
         onToggleChat?()
     }
 
@@ -322,6 +436,7 @@ final class AppModel: ObservableObject {
     /// Stops whatever she's doing right now: the agent turn, screen control, and speech.
     func stopEverything() {
         chatService.cancelStreaming()
+        coding.cancelAll()
         computer.endTask()
         speech.stop()
         if voiceInput.isListening { voiceInput.stop(deliver: false) }
@@ -431,6 +546,9 @@ final class AppModel: ObservableObject {
             if let prompt, let generated = await self.generateLine(prompt: prompt) {
                 line = generated
             }
+            // The model looked and decided it's not worth interrupting for.
+            let firstWord = line.split(whereSeparator: { !$0.isLetter }).first.map(String.init)
+            if firstWord == ProactiveEngine.skipToken { return }
             guard !Task.isCancelled, !line.isEmpty else { return }
             self.proactiveLinePending = true
             self.chatService.announce(line)

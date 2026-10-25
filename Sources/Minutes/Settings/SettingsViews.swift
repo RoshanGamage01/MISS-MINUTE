@@ -257,8 +257,10 @@ struct VoiceSettingsView: View {
     @EnvironmentObject private var appModel: AppModel
     @State private var elevenVoices: [ElevenLabsClient.Voice] = []
     @State private var voicesStatus: String?
+    @State private var sayVoices: [SpeechManager.SayVoice] = []
+    @State private var kokoroVoices: [String]?
 
-    private let neuralVoices = ["coral", "shimmer", "nova", "sage", "ballad", "alloy", "fable", "ash", "echo", "onyx"]
+    private let neuralVoices = ["coral", "shimmer", "nova", "sage", "ballad", "verse", "marin", "cedar", "alloy", "fable", "ash", "echo", "onyx"]
 
     var body: some View {
         let settings = appModel.settingsStore.settings
@@ -274,6 +276,24 @@ struct VoiceSettingsView: View {
                 }
                 .disabled(!settings.voiceEnabled)
                 LabeledContent("Speaking with", value: appModel.speech.activeEngineName)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text("Expressiveness")
+                        Slider(value: appModel.setting(\.voiceExpressiveness), in: 0...1) {
+                            Text("Expressiveness")
+                        } minimumValueLabel: {
+                            Image(systemName: "minus").font(.caption)
+                        } maximumValueLabel: {
+                            Image(systemName: "sparkles").font(.caption)
+                        }
+                        .labelsHidden()
+                    }
+                    Text("How much her pace and pitch change from line to line: questions lift, good news brightens, thoughtful asides slow down.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .disabled(!settings.voiceEnabled)
                 Button("Preview voice") {
                     appModel.speech.refreshVoices()
                     appModel.speech.previewCurrentVoice()
@@ -287,7 +307,23 @@ struct VoiceSettingsView: View {
             }
 
             Section {
+                VoiceListView(
+                    options: voiceOptions(settings),
+                    selected: selectedVoice(settings),
+                    onPick: pickVoice
+                )
+                .disabled(!settings.voiceEnabled)
+            } header: {
+                Text("Voice — \(engineTitle)")
+            } footer: {
+                Text("Click a voice to use it and hear a preview.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 LabeledContent("Your Mac's system voice", value: SpeechManager.systemVoiceName ?? "Default")
+                sayVoicePicker(settings)
                 Text("Siri voices are the most natural voices built into macOS. Apps can't use them directly, but Miss Minute speaks through your system voice, so pick a Siri voice there: System Settings → Accessibility → Spoken Content → System voice → choose a Siri voice (or Manage Voices… → download “Zoe (Premium)” or “Ava (Premium)”). Then click Preview voice.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -310,9 +346,7 @@ struct VoiceSettingsView: View {
                     Spacer()
                     Button("Check") { appModel.speech.probeLocalServer(force: true) }
                 }
-                Picker("Voice", selection: appModel.setting(\.localTTSVoice)) {
-                    ForEach(Self.kokoroVoices, id: \.0) { Text($0.1).tag($0.0) }
-                }
+                kokoroVoicePicker(settings)
                 TextField("Server URL", text: appModel.setting(\.localTTSURL))
                     .font(.system(.caption, design: .monospaced))
                 Text("Kokoro is a free, open-source neural voice that runs on your Mac and sounds close to a real person. Start it once with ./Scripts/start-kokoro.sh (needs Docker Desktop); Automatic uses it whenever it's running.")
@@ -393,6 +427,12 @@ struct VoiceSettingsView: View {
             }
 
             Section {
+                Toggle("Wake her with “Hey Minute”", isOn: appModel.setting(\.wakeWordEnabled))
+                Text(appModel.wakeWord.unavailableReason
+                     ?? "Say “Hey Minute, …” and your request in one go, or “Hey Minute” and wait for the chime. Listening runs entirely on your Mac and pauses while she talks and during calls.")
+                    .font(.caption)
+                    .foregroundStyle(appModel.wakeWord.unavailableReason == nil ? Color.secondary : Color.orange)
+                    .fixedSize(horizontal: false, vertical: true)
                 Toggle("Listen for my answer when she asks me something", isOn: appModel.setting(\.conversationMode))
                 Text("Push-to-talk: \(settings.listenHotKey.displayString), the mic in chat, or right-click her. With this on, after she asks you a question out loud the mic opens for a few seconds so you can just answer.")
                     .font(.caption)
@@ -406,7 +446,123 @@ struct VoiceSettingsView: View {
         .onAppear {
             appModel.speech.refreshVoices()
             if hasEleven { Task { await loadElevenVoices() } }
+            Task { sayVoices = await SpeechManager.sayVoices() }
+            Task { kokoroVoices = await appModel.speech.kokoroVoices() }
         }
+    }
+
+    // MARK: - Voice list (follows the engine that's actually speaking, e.g. the Mac voice with Ollama)
+
+    private var engineTitle: String {
+        switch appModel.speech.effectiveEngine {
+        case .appleSystem, .auto: return "Mac voices"
+        case .local: return "Kokoro voices"
+        case .elevenLabs: return "ElevenLabs voices"
+        case .openAI: return "OpenAI voices"
+        case .system: return "Apple voices"
+        }
+    }
+
+    private func voiceOptions(_ settings: AppSettings) -> [VoiceOption] {
+        switch appModel.speech.effectiveEngine {
+        case .appleSystem, .auto:
+            let system = VoiceOption(id: "", name: SpeechManager.systemVoiceName ?? "System voice",
+                                     detail: "Your Mac's system voice (Spoken Content)", group: "Recommended")
+            return [system] + sayVoices.map { voice in
+                VoiceOption(id: voice.name, name: voice.name, detail: Locale.current.localizedString(forIdentifier: voice.locale) ?? voice.locale,
+                            group: voice.isNovelty ? "Fun" : voice.locale.hasPrefix("en") ? "English" : "Other languages")
+            }
+        case .local:
+            let described = Dictionary(uniqueKeysWithValues: Self.kokoroVoices)
+            return (kokoroVoices ?? Self.kokoroVoices.map(\.0)).map { id in
+                let label = described[id] ?? Self.kokoroLabel(id)
+                let parts = label.components(separatedBy: " — ")
+                return VoiceOption(id: id, name: parts[0], detail: parts.count > 1 ? parts[1] : id, group: "Kokoro")
+            }
+        case .elevenLabs:
+            return [VoiceOption(id: "", name: "Automatic", detail: "Best match for Miss Minute", group: "ElevenLabs")]
+                + elevenVoices.map { VoiceOption(id: $0.id, name: $0.name, detail: $0.detail, group: "ElevenLabs") }
+        case .openAI:
+            return neuralVoices.map { VoiceOption(id: $0, name: $0.capitalized, detail: "OpenAI", group: "OpenAI") }
+        case .system:
+            return [VoiceOption(id: "", name: "Automatic", detail: "Best installed", group: "Apple")]
+                + appModel.speech.availableVoices.map { VoiceOption(id: $0.identifier, name: $0.name, detail: Self.label(for: $0), group: "Apple") }
+        }
+    }
+
+    private func selectedVoice(_ settings: AppSettings) -> String {
+        switch appModel.speech.effectiveEngine {
+        case .appleSystem, .auto: return settings.sayVoice
+        case .local: return settings.localTTSVoice
+        case .elevenLabs: return settings.elevenLabsVoiceID
+        case .openAI: return settings.neuralVoice
+        case .system: return settings.voiceIdentifier
+        }
+    }
+
+    private func pickVoice(_ id: String) {
+        let engine = appModel.speech.effectiveEngine
+        Task {
+            await appModel.updateSettings { settings in
+                switch engine {
+                case .appleSystem, .auto: settings.sayVoice = id
+                case .local: settings.localTTSVoice = id
+                case .elevenLabs: settings.elevenLabsVoiceID = id
+                case .openAI: settings.neuralVoice = id
+                case .system: settings.voiceIdentifier = id
+                }
+            }
+            appModel.speech.previewCurrentVoice()
+        }
+    }
+
+    private func sayVoicePicker(_ settings: AppSettings) -> some View {
+        Picker("Mac voice", selection: appModel.setting(\.sayVoice)) {
+            Text("System voice (\(SpeechManager.systemVoiceName ?? "Spoken Content setting"))").tag("")
+            let english = sayVoices.filter { $0.locale.hasPrefix("en") && !$0.isNovelty }
+            let others = sayVoices.filter { !$0.locale.hasPrefix("en") && !$0.isNovelty }
+            let novelty = sayVoices.filter(\.isNovelty)
+            if !english.isEmpty {
+                Section("English") {
+                    ForEach(english) { Text("\($0.name) (\($0.locale))").tag($0.name) }
+                }
+            }
+            if !others.isEmpty {
+                Section("Other languages") {
+                    ForEach(others) { Text("\($0.name) (\($0.locale))").tag($0.name) }
+                }
+            }
+            if !novelty.isEmpty {
+                Section("Fun") {
+                    ForEach(novelty) { Text($0.name).tag($0.name) }
+                }
+            }
+            if !settings.sayVoice.isEmpty, !sayVoices.contains(where: { $0.name == settings.sayVoice }) {
+                Text(settings.sayVoice).tag(settings.sayVoice)
+            }
+        }
+    }
+
+    private func kokoroVoicePicker(_ settings: AppSettings) -> some View {
+        Picker("Kokoro voice", selection: appModel.setting(\.localTTSVoice)) {
+            let described = Dictionary(uniqueKeysWithValues: Self.kokoroVoices)
+            let ids = kokoroVoices ?? Self.kokoroVoices.map(\.0)
+            ForEach(ids, id: \.self) { id in Text(described[id] ?? Self.kokoroLabel(id)).tag(id) }
+            if !ids.contains(settings.localTTSVoice) {
+                Text(settings.localTTSVoice).tag(settings.localTTSVoice)
+            }
+        }
+    }
+
+    /// "af_bella" → "Bella — American woman".
+    static func kokoroLabel(_ id: String) -> String {
+        let parts = id.split(separator: "_", maxSplits: 1)
+        guard parts.count == 2, let code = parts.first, code.count == 2 else { return id }
+        let accents: [Character: String] = ["a": "American", "b": "British", "j": "Japanese", "z": "Chinese",
+                                            "e": "Spanish", "f": "French", "h": "Hindi", "i": "Italian", "p": "Portuguese"]
+        let accent = accents[code.first!] ?? ""
+        let gender = code.last == "f" ? "woman" : code.last == "m" ? "man" : ""
+        return "\(parts[1].capitalized) — \(accent) \(gender)".trimmingCharacters(in: .whitespaces)
     }
 
     static let kokoroVoices: [(String, String)] = [
@@ -696,7 +852,7 @@ struct ComputerSettingsView: View {
                     ForEach(ComputerControl.allCases) { Text($0.displayName).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                Text("She clicks, types, uses shortcuts, and drives your browser to get tasks done. “Ask first” asks once per task. She never types passwords or payment details and won't send messages without your OK. Press ⌥Esc to stop her anytime.")
+                Text("She clicks, types, runs commands, plays music, drives your browser, and hands builds to a coding agent (Claude Code or Cursor) to get tasks done on her own. “Ask first” asks once per task. She never types passwords or payment details, and checks with you before sending messages, buying, or deleting your files. Press ⌥Esc to stop her anytime.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -758,5 +914,96 @@ struct ComputerSettingsView: View {
                 }
             }
         }
+    }
+}
+
+struct VoiceOption: Identifiable, Hashable {
+    /// The value stored in settings ("" = automatic / system voice).
+    var id: String
+    var name: String
+    var detail: String
+    var group: String
+}
+
+/// A searchable, scrollable list of voices; clicking one picks it.
+struct VoiceListView: View {
+    let options: [VoiceOption]
+    let selected: String
+    let onPick: (String) -> Void
+    @State private var query = ""
+
+    private var filtered: [VoiceOption] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return options }
+        return options.filter { $0.name.lowercased().contains(q) || $0.detail.lowercased().contains(q) }
+    }
+
+    private var groups: [(String, [VoiceOption])] {
+        var order: [String] = []
+        var byGroup: [String: [VoiceOption]] = [:]
+        for option in filtered {
+            if byGroup[option.group] == nil { order.append(option.group) }
+            byGroup[option.group, default: []].append(option)
+        }
+        return order.map { ($0, byGroup[$0]!) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if options.count > 8 {
+                TextField("Search", text: $query, prompt: Text("Search \(options.count) voices…"))
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+            }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2, pinnedViews: [.sectionHeaders]) {
+                    ForEach(groups, id: \.0) { group, voices in
+                        Section {
+                            ForEach(voices) { voice in row(voice) }
+                        } header: {
+                            Text(group.uppercased())
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 4)
+                                .background(.background)
+                        }
+                    }
+                    if filtered.isEmpty {
+                        Text(options.isEmpty ? "Loading voices…" : "No voices match “\(query)”.")
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 8)
+                    }
+                }
+            }
+            .frame(height: 240)
+        }
+    }
+
+    private func row(_ voice: VoiceOption) -> some View {
+        let isSelected = voice.id == selected
+        return Button {
+            onPick(voice.id)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(voice.name).fontWeight(isSelected ? .semibold : .regular)
+                    if !voice.detail.isEmpty {
+                        Text(voice.detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+                Spacer()
+                Image(systemName: "play.circle")
+                    .foregroundStyle(.secondary)
+                    .help("Use and preview this voice")
+            }
+            .padding(.vertical, 5)
+            .padding(.horizontal, 6)
+            .background(isSelected ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }

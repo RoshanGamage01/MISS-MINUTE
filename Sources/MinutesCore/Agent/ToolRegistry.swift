@@ -64,13 +64,35 @@ public final class ToolRegistry {
         if let raw = call.arguments["__invalid_json"]?.stringValue {
             return .failure("INVALID_JSON: the arguments for \(call.name) were not valid JSON (\(raw.prefix(200))). Call the tool again with valid JSON.")
         }
-        guard let tool = tools[call.name] else {
-            return .failure("Unknown tool \(call.name).")
+        // Self-healing: a slightly-wrong tool name or argument key is repaired instead of bounced back.
+        guard let name = tools[call.name] != nil ? call.name : ToolRecovery.resolveName(call.name, among: order),
+              let tool = tools[name] else {
+            return .failure("Unknown tool \(call.name). Available: \(order.joined(separator: ", ")).")
         }
+        let arguments = ToolRecovery.repairArguments(call.arguments, spec: tool.spec) ?? call.arguments
+        var outcome = await run(tool, name: name, arguments: arguments)
+        // Reads and opens are safe to repeat, so a network blip or busy app gets one more go.
+        if outcome.isError, Self.retrySafe.contains(name), ToolRecovery.isTransient(outcome.output), !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            outcome = await run(tool, name: name, arguments: arguments)
+        }
+        return outcome
+    }
+
+    /// Tools with no side effects beyond what a repeat would do anyway.
+    public static let retrySafe: Set<String> = [
+        "open_app", "open_url", "focus_app", "look_at_screen", "read_screen", "search_web", "read_webpage",
+        "get_calendar_events", "list_shortcuts", "get_system_status", "get_activity_summary", "read_clipboard",
+        "copy_to_clipboard", "list_tasks", "list_reminders", "recall", "coding_job_status"
+    ]
+
+    private func run(_ tool: AgentTool, name: String, arguments: JSONValue) async -> ToolOutcome {
         do {
-            return try await tool.run(call.arguments)
+            return try await tool.run(arguments)
+        } catch is CancellationError {
+            return .failure("\(name) was cancelled.")
         } catch {
-            return .failure("\(call.name) failed: \(error.localizedDescription)")
+            return .failure("\(name) failed: \(error.localizedDescription)")
         }
     }
 }

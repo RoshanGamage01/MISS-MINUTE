@@ -6,6 +6,8 @@ public enum MemoryEdit: Sendable, Equatable {
     /// `ref` is a memory's short id.
     case update(ref: String, fact: String)
     case remove(ref: String)
+    /// Connects two related memories (short ids) so recalling one brings up the other.
+    case link(ref: String, to: String)
 }
 
 /// Keeps memories current without the user asking: after an exchange that sounds personal, a quick
@@ -55,7 +57,10 @@ public final class MemoryCurator {
     @discardableResult
     public func apply(_ edits: [MemoryEdit]) async -> [String] {
         var changes: [String] = []
-        for edit in edits.prefix(6) {
+        // Adds and links in one review can refer to each other by fact text, so links run last.
+        let ordered = edits.filter { if case .link = $0 { return false }; return true }.prefix(6)
+            + edits.filter { if case .link = $0 { return true }; return false }.prefix(4)
+        for edit in ordered {
             switch edit {
             case .add(let fact, let category):
                 let before = store.items.count
@@ -69,6 +74,12 @@ public final class MemoryCurator {
                 guard let item = store.item(shortID: ref) else { continue }
                 await store.forget(id: item.id)
                 changes.append("Forgot: \(item.fact)")
+            case .link(let a, let b):
+                guard let first = store.find(a), let second = store.find(b), first.id != second.id,
+                      !(first.links ?? []).contains(second.id) else { continue }
+                if await store.link(first.id, second.id) {
+                    changes.append("Linked: \(first.fact) ↔ \(second.fact)")
+                }
             }
         }
         return changes
@@ -101,7 +112,10 @@ public final class MemoryCurator {
     """
 
     static func prompt(existing: [MemoryItem], userText: String, reply: String) -> String {
-        let list = existing.suffix(60).map { "[\($0.shortID)] \($0.fact)" }.joined(separator: "\n")
+        let list = existing.suffix(60).map { item -> String in
+            let links = (item.links ?? []).compactMap { id in existing.first { $0.id == id }?.shortID }
+            return "[\(item.shortID)] \(item.fact)" + (links.isEmpty ? "" : " (linked: \(links.joined(separator: ", ")))")
+        }.joined(separator: "\n")
         return """
         Current memories:
         \(list.isEmpty ? "(none)" : list)
@@ -116,9 +130,11 @@ public final class MemoryCurator {
         If a new fact contradicts or refines an existing memory, update that memory instead of adding a duplicate. \
         If the user says something is no longer true or asks to forget it, remove it.
         Write facts as short third-person sentences ("User's sister Maya lives in Austin.").
+        Link memories that belong together but don't share obvious words (a person and their birthday, a goal and \
+        the routine serving it). In "link", refer to a memory by its id, or to a fact you're adding by its exact text.
 
         Respond with exactly this JSON shape (use empty arrays when nothing changes, which is most of the time):
-        {"add":[{"fact":"...","category":"preference|person|routine|goal|work|other"}],"update":[{"id":"abc123","fact":"..."}],"remove":["abc123"]}
+        {"add":[{"fact":"...","category":"preference|person|routine|goal|work|other"}],"update":[{"id":"abc123","fact":"..."}],"remove":["abc123"],"link":[["abc123","def456"]]}
         """
     }
 
@@ -139,7 +155,18 @@ public final class MemoryCurator {
             guard let id = entry.stringValue ?? entry["id"]?.stringValue else { continue }
             edits.append(.remove(ref: id.lowercased()))
         }
+        for entry in json["link"]?.arrayValue ?? [] {
+            let pair = (entry.arrayValue ?? [entry["a"] ?? .null, entry["b"] ?? .null]).compactMap(\.stringValue)
+            guard pair.count == 2 else { continue }
+            edits.append(.link(ref: normalizedRef(pair[0]), to: normalizedRef(pair[1])))
+        }
         return edits
+    }
+
+    /// Short ids are lowercased; fact text (for links to memories added in the same review) is kept as is.
+    private static func normalizedRef(_ ref: String) -> String {
+        let trimmed = ref.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.count == 6 && !trimmed.contains(" ") ? trimmed.lowercased() : trimmed
     }
 
     private static func cleaned(_ fact: String?) -> String? {

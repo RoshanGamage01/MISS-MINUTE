@@ -163,7 +163,12 @@ public struct OpenAICompatibleProvider: ChatProvider, Sendable {
                                 var entry = pending[index] ?? (id: "", name: "", args: "")
                                 if let id = fragment["id"] as? String { entry.id = id }
                                 if let function = fragment["function"] as? [String: Any] {
-                                    if let name = function["name"] as? String { entry.name += name }
+                                    if let name = function["name"] as? String {
+                                        if entry.name.isEmpty, !name.isEmpty {
+                                            continuation.yield(.toolCallStarted(name: name))
+                                        }
+                                        entry.name += name
+                                    }
                                     if let args = function["arguments"] as? String { entry.args += args }
                                 }
                                 pending[index] = entry

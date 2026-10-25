@@ -47,6 +47,11 @@ for bundle in "$(dirname "$BIN_PATH")"/*.bundle; do
 done
 shopt -u nullglob
 
+# App icon (regenerate with ./Scripts/make-icon.sh).
+if [[ -f "$ROOT/Assets/AppIcon.icns" ]]; then
+  cp "$ROOT/Assets/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
+fi
+
 # Prefer the checked-in Info.plist, then rewrite version keys.
 if [[ -f "$ROOT/Sources/Minutes/Info.plist" ]]; then
   cp "$ROOT/Sources/Minutes/Info.plist" "$CONTENTS/Info.plist"
@@ -77,6 +82,10 @@ fi
   || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$CONTENTS/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$CONTENTS/Info.plist" 2>/dev/null \
   || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUMBER" "$CONTENTS/Info.plist"
+if [[ -f "$RESOURCES_DIR/AppIcon.icns" ]]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$CONTENTS/Info.plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$CONTENTS/Info.plist"
+fi
 
 ENTITLEMENTS="$ROOT/Sources/Minutes/Minutes.entitlements"
 if [[ -n "$SIGN_IDENTITY" ]]; then

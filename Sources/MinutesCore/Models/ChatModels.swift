@@ -33,6 +33,8 @@ public struct ChatMessage: Codable, Sendable, Equatable, Identifiable {
     public var providerContent: JSONValue?
     /// Images the model should see with this message (screenshots from tools). Dropped when the turn ends.
     public var images: [ImageAttachment]?
+    /// A note the app sent to the model (e.g. "you said you'd do it but didn't"); never shown in the chat.
+    public var isHidden: Bool?
 
     public init(
         id: UUID = UUID(),
@@ -47,7 +49,8 @@ public struct ChatMessage: Codable, Sendable, Equatable, Identifiable {
         contextNote: String? = nil,
         isProactive: Bool? = nil,
         providerContent: JSONValue? = nil,
-        images: [ImageAttachment]? = nil
+        images: [ImageAttachment]? = nil,
+        isHidden: Bool? = nil
     ) {
         self.id = id
         self.role = role
@@ -62,6 +65,7 @@ public struct ChatMessage: Codable, Sendable, Equatable, Identifiable {
         self.isProactive = isProactive
         self.providerContent = providerContent
         self.images = images
+        self.isHidden = isHidden
     }
 
     public var hasToolCalls: Bool { !(toolCalls ?? []).isEmpty }
@@ -117,6 +121,17 @@ public enum ProviderKind: String, Codable, CaseIterable, Sendable, Identifiable 
     }
 
     /// Runs entirely on this Mac.
+    /// The cloud API host, for opening the connection before the first request (nil for local providers,
+    /// whose server URL is user-configured).
+    public var apiHost: URL? {
+        switch self {
+        case .anthropic: return URL(string: "https://api.anthropic.com/")
+        case .openAI: return URL(string: "https://api.openai.com/")
+        case .xAI: return URL(string: "https://api.x.ai/")
+        case .ollama, .localServer: return nil
+        }
+    }
+
     public var isLocal: Bool {
         self == .ollama || self == .localServer
     }

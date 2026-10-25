@@ -10,6 +10,8 @@ final class ScreenWatcher {
     /// True when she shouldn't glance (in a conversation, on a call…).
     var isBusy: () -> Bool = { false }
     var onOffer: ((String) -> Void)?
+    /// Each new note (the proactive engine scans them for errors the user may be stuck on).
+    var onNote: ((String) -> Void)?
 
     private let computer: ComputerController
     private var timer: Timer?
@@ -28,6 +30,14 @@ final class ScreenWatcher {
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.tickIfDue() }
         }
+    }
+
+    /// Something looks wrong on screen: glance on the next tick instead of waiting out the interval
+    /// (still only in "always aware" mode, and never mid-conversation).
+    func glanceSoon() {
+        guard Date().timeIntervalSince(lastGlance) > 60 else { return }
+        lastGlance = .distantPast
+        lastSignature = ""
     }
 
     /// Notes for the context block, oldest first, e.g. "14:05 — Editing invoice.xlsx in Numbers".
@@ -72,7 +82,8 @@ final class ScreenWatcher {
         Quick glance at the user's screen (an automatic check, not a message from them). \
         Front app: \(app ?? "unknown")\(title.map { ", window \"\($0)\"" } ?? "").
         Reply in exactly two lines:
-        NOTE: one specific sentence about what they're doing right now (app, topic, file, page, problem).
+        NOTE: one specific sentence about what they're doing right now (app, topic, file, page, problem). If an \
+        error, failed build, crash, or warning dialog is visible, say so and quote its key message.
         OFFER: one short spoken line offering concrete help with what you see — an error you could explain, \
         something you could look up, a task you could do — or "none" if they're just working fine. \
         Offer rarely; never interrupt focused work for small talk.
@@ -104,6 +115,7 @@ final class ScreenWatcher {
         if let note {
             notes.append((Date(), note))
             if notes.count > 30 { notes.removeFirst(notes.count - 30) }
+            onNote?(note)
         }
         if let offer, !isBusy() {
             offers.append(offer)

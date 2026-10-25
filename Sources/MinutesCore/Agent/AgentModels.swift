@@ -109,6 +109,9 @@ public enum TurnStopReason: String, Sendable, Equatable {
 public enum ProviderEvent: Sendable, Equatable {
     case textDelta(String)
     case toolCall(ToolCall)
+    /// The model began writing a tool call (its arguments are still streaming). Lets the app speak a quick
+    /// acknowledgement before anything runs.
+    case toolCallStarted(name: String)
     /// Hosted tool activity worth surfacing (e.g. "Searching the web for …").
     case status(String)
     /// Emitted once, last. `rawContent` is the provider's own assistant content

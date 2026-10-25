@@ -16,9 +16,23 @@ enum SystemTools {
                 required: ["name"]
             )) { args in
                 let name = try args.requiredString("name")
-                let result = await Shell.run("/usr/bin/open", ["-a", name])
-                guard result.status == 0 else { throw ToolError("Couldn't find an app called \(name).") }
-                return .ok("Opened \(name).", summary: "Opened \(name)")
+                // `open -a` needs the exact name; if that misses, find the closest installed app ("VS Code" →
+                // "Visual Studio Code"), then ask Spotlight.
+                return try await ToolRecovery.firstSuccess("open \(name)", [
+                    .init("open -a") {
+                        let result = await Shell.run("/usr/bin/open", ["-a", name])
+                        guard result.status == 0 else { throw ToolError(result.error.isEmpty ? "not found" : String(result.error.prefix(160))) }
+                        return .ok("Opened \(name).", summary: "Opened \(name)")
+                    },
+                    .init("closest installed app") {
+                        guard let url = AppLocator.installedApp(named: name) else { throw ToolError("no installed app matches") }
+                        return try await AppLocator.launch(url)
+                    },
+                    .init("Spotlight") {
+                        guard let url = await AppLocator.spotlightApp(named: name) else { throw ToolError("Spotlight found nothing") }
+                        return try await AppLocator.launch(url)
+                    }
+                ])
             },
 
             AgentTool(spec: .object(
@@ -27,12 +41,22 @@ enum SystemTools {
                 properties: ["url": ["type": "string"]],
                 required: ["url"]
             )) { args in
-                var raw = try args.requiredString("url")
-                if !raw.contains("://"), !raw.hasPrefix("mailto:") { raw = "https://" + raw }
-                guard let url = URL(string: raw), NSWorkspace.shared.open(url) else {
+                let raw = try args.requiredString("url")
+                guard let url = LinkRepair.url(from: raw) else {
                     throw ToolError("That doesn't look like a link I can open.")
                 }
-                return .ok("Opened \(raw).", summary: "Opened \(url.host ?? raw)")
+                let label = url.host ?? url.absoluteString
+                return try await ToolRecovery.firstSuccess("open \(raw)", [
+                    .init("NSWorkspace") {
+                        guard NSWorkspace.shared.open(url) else { throw ToolError("the system refused the link") }
+                        return .ok("Opened \(url.absoluteString).", summary: "Opened \(label)")
+                    },
+                    .init("open command") {
+                        let result = await Shell.run("/usr/bin/open", [url.absoluteString])
+                        guard result.status == 0 else { throw ToolError(String(result.error.prefix(160))) }
+                        return .ok("Opened \(url.absoluteString).", summary: "Opened \(label)")
+                    }
+                ])
             },
 
             AgentTool(spec: .object(
@@ -42,18 +66,40 @@ enum SystemTools {
                 required: ["text"]
             )) { args in
                 let text = try args.requiredString("text")
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(text, forType: .string)
-                return .ok("Copied \(text.count) characters.", summary: "Copied to clipboard")
+                // Check it actually landed; another app can hold the pasteboard for a moment.
+                return try await ToolRecovery.firstSuccess("copy to the clipboard", [
+                    .init("pasteboard") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(text, forType: .string)
+                        guard NSPasteboard.general.string(forType: .string) == text else { throw ToolError("didn't stick") }
+                        return .ok("Copied \(text.count) characters.", summary: "Copied to clipboard")
+                    },
+                    .init("pbcopy") {
+                        // The text is passed as an argument, never interpolated into the script.
+                        let result = await Shell.run("/bin/sh", ["-c", "printf '%s' \"$1\" | /usr/bin/pbcopy", "sh", text])
+                        guard result.status == 0, NSPasteboard.general.string(forType: .string) == text else {
+                            throw ToolError("pbcopy failed")
+                        }
+                        return .ok("Copied \(text.count) characters.", summary: "Copied to clipboard")
+                    }
+                ])
             },
 
             AgentTool(spec: .object(
                 "read_clipboard",
                 "Read the text currently on the clipboard. Only when the user refers to what they copied."
             )) { _ in
-                guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
-                    return .ok("The clipboard has no text.")
+                if let text = NSPasteboard.general.string(forType: .string), !text.isEmpty {
+                    return .ok(String(text.prefix(8_000)), summary: "Read the clipboard")
                 }
+                // Copied files or links rather than text.
+                if let urls = NSPasteboard.general.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty {
+                    let list = urls.prefix(50).map { $0.isFileURL ? $0.path : $0.absoluteString }.joined(separator: "\n")
+                    return .ok("The clipboard holds \(urls.count) item(s):\n\(list)", summary: "Read the clipboard")
+                }
+                let fallback = await Shell.run("/usr/bin/pbpaste", [])
+                let text = fallback.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard fallback.status == 0, !text.isEmpty else { return .ok("The clipboard has no text.") }
                 return .ok(String(text.prefix(8_000)), summary: "Read the clipboard")
             },
 
@@ -83,13 +129,28 @@ enum SystemTools {
                     inputFile = file
                 }
                 defer { if let inputFile { try? FileManager.default.removeItem(at: inputFile) } }
-                let result = await Shell.run("/usr/bin/shortcuts", arguments, timeout: 60)
+                var ran = name
+                var result = await Shell.run("/usr/bin/shortcuts", arguments, timeout: 60)
+                if result.status != 0, result.status != -1 {
+                    // Usually a slightly-off name: retry once with the closest shortcut that exists.
+                    let list = await Shell.run("/usr/bin/shortcuts", ["list"])
+                    let names = list.output.split(separator: "\n").map(String.init)
+                    if !names.contains(name),
+                       let match = names.first(where: { $0.caseInsensitiveCompare(name) == .orderedSame })
+                           ?? ToolRecovery.bestMatch(name, in: names, text: { $0 }) {
+                        arguments[1] = match
+                        ran = match
+                        result = await Shell.run("/usr/bin/shortcuts", arguments, timeout: 60)
+                    }
+                }
                 guard result.status == 0 else {
-                    throw ToolError("Shortcut '\(name)' failed: \(result.error.prefix(300))")
+                    let reason = result.status == -1 ? "it timed out after a minute" : String(result.error.prefix(300))
+                    throw ToolError("Shortcut '\(ran)' failed: \(reason)")
                 }
                 let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-                return .ok(output.isEmpty ? "Ran '\(name)'." : "Ran '\(name)'. Output: \(output.prefix(2_000))",
-                           summary: "Ran shortcut: \(name)")
+                let renamed = ran == name ? "" : " (closest match for '\(name)')"
+                return .ok(output.isEmpty ? "Ran '\(ran)'\(renamed)." : "Ran '\(ran)'\(renamed). Output: \(output.prefix(2_000))",
+                           summary: "Ran shortcut: \(ran)")
             },
 
             AgentTool(spec: .object(
@@ -207,12 +268,107 @@ final class CalendarService {
         event.endDate = max(end, start.addingTimeInterval(300))
         event.location = location
         event.notes = notes
-        event.calendar = store.defaultCalendarForNewEvents
-        try store.save(event, span: .thisEvent)
+        // No default calendar (fresh account, or it was deleted): fall back to any calendar that takes events.
+        guard let target = store.defaultCalendarForNewEvents
+            ?? store.calendars(for: .event).first(where: \.allowsContentModifications) else {
+            throw ToolError("There's no calendar I can add events to. The user may need to add one in the Calendar app.")
+        }
+        event.calendar = target
+        do {
+            try store.save(event, span: .thisEvent)
+        } catch {
+            // The chosen calendar may be read-only (subscribed, shared); try the others before giving up.
+            for other in store.calendars(for: .event) where other.allowsContentModifications && other != target {
+                event.calendar = other
+                if (try? store.save(event, span: .thisEvent)) != nil { return }
+            }
+            throw error
+        }
     }
 }
 
 // MARK: - Helpers
+
+/// Finds installed apps when `open -a` doesn't recognise the name the model used.
+@MainActor
+enum AppLocator {
+    private static let folders = [
+        "/Applications", "/Applications/Utilities", "/System/Applications", "/System/Applications/Utilities",
+        NSHomeDirectory() + "/Applications"
+    ]
+
+    /// The installed app whose name best matches: exact, then prefix, then shared words, then contains.
+    static func installedApp(named name: String) -> URL? {
+        let apps = folders.flatMap { folder -> [URL] in
+            ((try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? [])
+                .filter { $0.hasSuffix(".app") }
+                .map { URL(fileURLWithPath: folder).appendingPathComponent($0) }
+        }
+        let key = normalized(name)
+        guard !key.isEmpty else { return nil }
+        func appName(_ url: URL) -> String { normalized(url.deletingPathExtension().lastPathComponent) }
+        if let exact = apps.first(where: { appName($0) == key }) { return exact }
+        if let prefix = apps.first(where: { appName($0).hasPrefix(key) }) { return prefix }
+        if let words = ToolRecovery.bestMatch(name, in: apps, text: { $0.deletingPathExtension().lastPathComponent }) { return words }
+        // Initialisms like "VS Code" → "Visual Studio Code".
+        if let initials = apps.first(where: { abbreviations($0.deletingPathExtension().lastPathComponent).contains(key) }) {
+            return initials
+        }
+        return apps.first(where: { appName($0).contains(key) })
+    }
+
+    static func spotlightApp(named name: String) async -> URL? {
+        let safe = name.replacingOccurrences(of: "\"", with: "").replacingOccurrences(of: "'", with: "")
+        let query = "kMDItemContentType == 'com.apple.application-bundle' && kMDItemDisplayName == '*\(safe)*'cd"
+        let result = await Shell.run("/usr/bin/mdfind", [query], timeout: 8)
+        return result.output.split(separator: "\n").first.map { URL(fileURLWithPath: String($0)) }
+    }
+
+    static func launch(_ url: URL) async throws -> ToolOutcome {
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        let app = try await NSWorkspace.shared.openApplication(at: url, configuration: config)
+        let name = app.localizedName ?? url.deletingPathExtension().lastPathComponent
+        return .ok("Opened \(name).", summary: "Opened \(name)")
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    /// "Visual Studio Code" → ["vsc", "vscode"]: all initials, and initials plus the last word.
+    private static func abbreviations(_ name: String) -> Set<String> {
+        let words = name.split(separator: " ").map { normalized(String($0)) }.filter { !$0.isEmpty }
+        guard words.count >= 2 else { return [] }
+        let initials = words.compactMap(\.first).map(String.init)
+        return [initials.joined(), initials.dropLast().joined() + words.last!]
+    }
+}
+
+/// Turns what the model passes as a link into something openable: trims quotes and brackets, adds a scheme,
+/// percent-encodes stray spaces, and treats plain words as a web search.
+enum LinkRepair {
+    static func url(from raw: String) -> URL? {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"'<>`")))
+        guard !text.isEmpty else { return nil }
+        let hasScheme = text.range(of: #"^[a-zA-Z][a-zA-Z0-9+.-]*:"#, options: .regularExpression) != nil
+        if !hasScheme {
+            let looksLikeHost = text.range(of: #"^[^\s/]+\.[a-zA-Z]{2,}(:\d+)?(/|$|\?)"#, options: .regularExpression) != nil
+                || text.range(of: #"^\d{1,3}(\.\d{1,3}){3}(:\d+)?(/|$)"#, options: .regularExpression) != nil
+                || text.hasPrefix("localhost")
+            guard looksLikeHost else {
+                // Not a link at all: search for it instead of failing.
+                var search = URLComponents(string: "https://www.google.com/search")!
+                search.queryItems = [URLQueryItem(name: "q", value: text)]
+                return search.url
+            }
+            text = (text.hasPrefix("localhost") ? "http://" : "https://") + text
+        }
+        if let url = URL(string: text), url.scheme != nil { return url }
+        let encoded = text.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed.union(CharacterSet(charactersIn: "#%")))
+        return encoded.flatMap(URL.init(string:))
+    }
+}
 
 enum Shell {
     struct Result: Sendable {
@@ -221,29 +377,65 @@ enum Shell {
         var error: String
     }
 
-    /// Runs a process off the main thread.
-    static func run(_ path: String, _ arguments: [String], timeout: TimeInterval = 20) async -> Result {
-        await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: path)
-            process.arguments = arguments
-            let out = Pipe(), err = Pipe()
-            process.standardOutput = out
-            process.standardError = err
-            do {
-                try process.run()
-            } catch {
-                return Result(status: -1, output: "", error: error.localizedDescription)
-            }
-            let deadline = Date().addingTimeInterval(timeout)
-            while process.isRunning, Date() < deadline {
-                try? await Task.sleep(nanoseconds: 50_000_000)
-            }
+    /// Runs a process off the main thread. Output is drained while it runs, so chatty commands can't stall on a
+    /// full pipe. Cancelling the calling task stops the process.
+    static func run(_ path: String, _ arguments: [String], timeout: TimeInterval = 20, cwd: URL? = nil) async -> Result {
+        let process = Process()
+        return await withTaskCancellationHandler {
+            await Task.detached(priority: .userInitiated) {
+                process.executableURL = URL(fileURLWithPath: path)
+                process.arguments = arguments
+                if let cwd { process.currentDirectoryURL = cwd }
+                process.standardInput = FileHandle.nullDevice
+                let out = Pipe(), err = Pipe()
+                process.standardOutput = out
+                process.standardError = err
+                let output = OutputBuffer(), error = OutputBuffer()
+                out.fileHandleForReading.readabilityHandler = { output.append($0.availableData) }
+                err.fileHandleForReading.readabilityHandler = { error.append($0.availableData) }
+                do {
+                    try process.run()
+                } catch {
+                    return Result(status: -1, output: "", error: error.localizedDescription)
+                }
+                let deadline = Date().addingTimeInterval(timeout)
+                while process.isRunning, Date() < deadline, !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
+                let timedOut = process.isRunning
+                if timedOut {
+                    process.terminate()
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                }
+                out.fileHandleForReading.readabilityHandler = nil
+                err.fileHandleForReading.readabilityHandler = nil
+                output.append(out.fileHandleForReading.readDataToEndOfFile())
+                error.append(err.fileHandleForReading.readDataToEndOfFile())
+                return Result(status: timedOut ? -1 : process.terminationStatus, output: output.text, error: error.text)
+            }.value
+        } onCancel: {
             if process.isRunning { process.terminate() }
-            let output = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            let error = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            return Result(status: process.isRunning ? -1 : process.terminationStatus, output: output, error: error)
-        }.value
+        }
+    }
+
+    /// Collects pipe output from the reader thread, keeping only the last 2 MB.
+    private final class OutputBuffer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+
+        func append(_ chunk: Data) {
+            guard !chunk.isEmpty else { return }
+            lock.lock()
+            data.append(chunk)
+            if data.count > 2_000_000 { data = data.suffix(1_000_000) }
+            lock.unlock()
+        }
+
+        var text: String {
+            lock.lock()
+            defer { lock.unlock() }
+            return String(decoding: data, as: UTF8.self)
+        }
     }
 }
 

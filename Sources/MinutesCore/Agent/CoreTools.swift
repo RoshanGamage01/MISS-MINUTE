@@ -59,8 +59,7 @@ public enum CoreTools {
                 properties: ["task": taskRef],
                 required: ["task"]
             )) { args in
-                let ref = try args.requiredString("task")
-                guard let task = store.find(ref) else { throw ToolError("No task matches '\(ref)'. Call list_tasks.") }
+                let task = try findTask(store, try args.requiredString("task"))
                 await store.setDone(id: task.id)
                 let remaining = store.openTasks.count
                 return .ok("Completed [\(task.shortID)] \(task.title). \(remaining) open task(s) left.", summary: "Done: \(task.title)")
@@ -72,8 +71,7 @@ public enum CoreTools {
                 properties: ["task": taskRef, "title": ["type": "string"], "notes": ["type": "string"], "due": due, "priority": priority],
                 required: ["task"]
             )) { args in
-                let ref = try args.requiredString("task")
-                guard let task = store.find(ref) else { throw ToolError("No task matches '\(ref)'.") }
+                let task = try findTask(store, try args.requiredString("task"))
                 var newDue: Date?? = nil
                 if let dueText = args.optionalString("due") {
                     if dueText.lowercased() == "none" {
@@ -97,8 +95,8 @@ public enum CoreTools {
                 properties: ["task": taskRef],
                 required: ["task"]
             )) { args in
-                let ref = try args.requiredString("task")
-                guard let task = store.find(ref) else { throw ToolError("No task matches '\(ref)'.") }
+                // Deleting is destructive, so no guessing: exact id or title only.
+                let task = try findTask(store, try args.requiredString("task"), fuzzy: false)
                 await store.remove(id: task.id)
                 return .ok("Deleted [\(task.shortID)] \(task.title).", summary: "Removed task: \(task.title)")
             }
@@ -120,11 +118,18 @@ public enum CoreTools {
                 required: ["text"]
             )) { args in
                 let text = try args.requiredString("text")
-                let fireAt: Date
-                if let minutes = args["in_minutes"]?.doubleValue, minutes > 0 {
+                var fireAt: Date
+                if let minutes = args.lenientNumber("in_minutes", minutes: true), minutes > 0 {
                     fireAt = Date().addingTimeInterval(minutes * 60)
                 } else if let at = args.optionalString("at") {
                     fireAt = try parseDate(at)
+                    // "15:30" when it's already 16:00 means tomorrow, not an error.
+                    if fireAt < Date(), Date().timeIntervalSince(fireAt) < 86_400, !hasExplicitDay(at) {
+                        fireAt = Calendar.current.date(byAdding: .day, value: 1, to: fireAt) ?? fireAt
+                    }
+                } else if let parsed = ReminderParser().parse("remind me \(text)") {
+                    // The time ended up inside the text ("call mom in 20 minutes").
+                    fireAt = parsed.fireAt
                 } else {
                     throw ToolError("Provide `at` or `in_minutes`.")
                 }
@@ -145,7 +150,7 @@ public enum CoreTools {
                 ],
                 required: ["minutes"]
             )) { args in
-                guard let minutes = args["minutes"]?.doubleValue, minutes > 0, minutes <= 24 * 60 else {
+                guard let minutes = args.lenientNumber("minutes", minutes: true), minutes > 0, minutes <= 24 * 60 else {
                     throw ToolError("minutes must be between 0 and 1440.")
                 }
                 let label = args.optionalString("label") ?? "timer"
@@ -168,7 +173,10 @@ public enum CoreTools {
                 required: ["reminder"]
             )) { args in
                 let ref = try args.requiredString("reminder")
-                guard let reminder = store.find(ref) else { throw ToolError("No pending reminder matches '\(ref)'.") }
+                guard let reminder = store.find(ref) ?? ToolRecovery.bestMatch(ref, in: store.upcoming, text: \.text) else {
+                    let pending = store.upcoming.prefix(5).map { "[\($0.shortID)] \($0.text)" }.joined(separator: "; ")
+                    throw ToolError("No pending reminder matches '\(ref)'." + (pending.isEmpty ? " There are none pending." : " Pending: \(pending)"))
+                }
                 await store.remove(id: reminder.id)
                 return .ok("Cancelled [\(reminder.shortID)].", summary: "Cancelled reminder: \(reminder.text)")
             }
@@ -190,7 +198,9 @@ public enum CoreTools {
             )) { args in
                 let fact = try args.requiredString("fact")
                 let item = await store.remember(fact, category: args.optionalString("category") ?? "other")
-                return .ok("Saved memory [\(item.shortID)].", summary: "Remembered: \(fact)")
+                let related = store.related(to: item.id).prefix(3).map { "[\($0.shortID)] \($0.fact)" }
+                let note = related.isEmpty ? "" : " Linked to related memories: " + related.joined(separator: "; ")
+                return .ok("Saved memory [\(item.shortID)].\(note)", summary: "Remembered: \(fact)")
             },
 
             AgentTool(spec: .object(
@@ -200,7 +210,15 @@ public enum CoreTools {
             )) { args in
                 let results = store.search(args.optionalString("query") ?? "")
                 guard !results.isEmpty else { return .ok("Nothing remembered about that.") }
-                return .ok(results.map { "[\($0.shortID)] (\($0.category)) \($0.fact)" }.joined(separator: "\n"))
+                // Each hit brings its linked memories along, so related context comes back in one call.
+                let shown = Set(results.map(\.id))
+                return .ok(results.map { item -> String in
+                    var line = "[\(item.shortID)] (\(item.category)) \(item.fact)"
+                    for neighbour in store.related(to: item.id).prefix(2) where !shown.contains(neighbour.id) {
+                        line += "\n  ↳ related [\(neighbour.shortID)] \(neighbour.fact)"
+                    }
+                    return line
+                }.joined(separator: "\n"))
             },
 
             AgentTool(spec: .object(
@@ -210,17 +228,36 @@ public enum CoreTools {
                 required: ["memory"]
             )) { args in
                 let ref = try args.requiredString("memory")
-                guard let item = store.find(ref) else { throw ToolError("No memory matches '\(ref)'.") }
+                guard let item = store.find(ref) else {
+                    throw ToolError("No memory matches '\(ref)'. Use recall to find it first.")
+                }
                 await store.forget(id: item.id)
                 return .ok("Forgot [\(item.shortID)].", summary: "Forgot: \(item.fact)")
             }
         ]
     }
 
-    private static func parseDate(_ text: String) throws -> Date {
-        guard let date = ToolDates.parse(text) else {
-            throw ToolError("Couldn't read the date '\(text)'. Use ISO 8601 local time like 2026-10-25T15:30.")
+    /// Exact id/title first, then the closest title; a miss lists the open tasks so the model can retry right.
+    private static func findTask(_ store: TaskStore, _ ref: String, fuzzy: Bool = true) throws -> TrackedTask {
+        if let task = store.find(ref) ?? (fuzzy ? ToolRecovery.bestMatch(ref, in: store.openTasks, text: \.title) : nil) {
+            return task
         }
-        return date
+        let open = store.openTasks.prefix(8).map { "[\($0.shortID)] \($0.title)" }.joined(separator: "; ")
+        throw ToolError("No task matches '\(ref)'." + (open.isEmpty ? " There are no open tasks." : " Open tasks: \(open)"))
+    }
+
+    /// ISO 8601 first, then natural phrases the model sometimes sends instead ("tomorrow at 5pm", "in 2 hours").
+    private static func parseDate(_ text: String) throws -> Date {
+        if let date = ToolDates.parse(text) { return date }
+        if let parsed = ReminderParser().parse("remind me \(text) to x") { return parsed.fireAt }
+        throw ToolError("Couldn't read the date '\(text)'. Use ISO 8601 local time like 2026-10-25T15:30.")
+    }
+
+    /// Whether a time string names a day (a date, weekday, or "tomorrow") rather than just a clock time.
+    private static func hasExplicitDay(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        if lower.range(of: #"\d{4}-\d{2}-\d{2}"#, options: .regularExpression) != nil { return true }
+        return ["tomorrow", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "next"]
+            .contains(where: lower.contains)
     }
 }

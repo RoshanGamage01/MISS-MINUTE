@@ -151,7 +151,7 @@ public enum ComputerControl: String, Codable, CaseIterable, Sendable, Identifiab
         switch self {
         case .off: return "Off"
         case .ask: return "Ask first"
-        case .auto: return "Allowed"
+        case .auto: return "On her own"
         }
     }
 }
@@ -253,6 +253,12 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var localOnly: Bool
     /// Quietly notes (and corrects) lasting facts about the user after each conversation.
     public var autoMemory: Bool
+    /// How animated her delivery is (0 = even, 1 = very lively): pace and pitch vary line by line.
+    public var voiceExpressiveness: Double
+    /// Voice for the Mac system-voice engine (`say -v`); empty = the system voice from Spoken Content settings.
+    public var sayVoice: String
+    /// Always-on, on-device listening for "Hey Minute".
+    public var wakeWordEnabled: Bool
 
     public init(
         provider: ProviderKind = .ollama,
@@ -296,13 +302,16 @@ public struct AppSettings: Codable, Sendable, Equatable {
         breakAfterMinutes: Int = 90,
         quietDuringMeetings: Bool = true,
         calendarAccessEnabled: Bool = false,
-        computerControl: ComputerControl = .ask,
+        computerControl: ComputerControl = .auto,
         screenAwareness: ScreenAwareness = .onDemand,
         screenGlanceMinutes: Int = 3,
         localServerURL: String = "http://localhost:1234/v1",
         ollamaContextLength: Int = 32768,
         localOnly: Bool = false,
-        autoMemory: Bool = true
+        autoMemory: Bool = true,
+        voiceExpressiveness: Double = 0.6,
+        sayVoice: String = "",
+        wakeWordEnabled: Bool = true
     ) {
         self.provider = provider
         self.model = model
@@ -352,9 +361,12 @@ public struct AppSettings: Codable, Sendable, Equatable {
         self.ollamaContextLength = ollamaContextLength
         self.localOnly = localOnly
         self.autoMemory = autoMemory
+        self.voiceExpressiveness = voiceExpressiveness
+        self.sayVoice = sayVoice
+        self.wakeWordEnabled = wakeWordEnabled
     }
 
-    public static let currentVersion = 4
+    public static let currentVersion = 5
     public static let `default` = AppSettings()
 
     public init(from decoder: Decoder) throws {
@@ -409,6 +421,9 @@ public struct AppSettings: Codable, Sendable, Equatable {
         ollamaContextLength = try c.decodeIfPresent(Int.self, forKey: .ollamaContextLength) ?? d.ollamaContextLength
         localOnly = try c.decodeIfPresent(Bool.self, forKey: .localOnly) ?? d.localOnly
         autoMemory = try c.decodeIfPresent(Bool.self, forKey: .autoMemory) ?? d.autoMemory
+        voiceExpressiveness = try c.decodeIfPresent(Double.self, forKey: .voiceExpressiveness) ?? d.voiceExpressiveness
+        sayVoice = try c.decodeIfPresent(String.self, forKey: .sayVoice) ?? d.sayVoice
+        wakeWordEnabled = try c.decodeIfPresent(Bool.self, forKey: .wakeWordEnabled) ?? d.wakeWordEnabled
     }
 
     /// Upgrades settings saved by older builds (stale persona text, retired model IDs).
@@ -424,6 +439,10 @@ public struct AppSettings: Codable, Sendable, Equatable {
         if settingsVersion < 4 {
             // v4: replies start talking right away; the old default ElevenLabs model was the slowest one.
             if elevenLabsModel == "eleven_multilingual_v2" { elevenLabsModel = "eleven_flash_v2_5" }
+        }
+        if settingsVersion < 5 {
+            // v5: she works on her own; "Ask first" popped a dialog before every task.
+            if computerControl == .ask { computerControl = .auto }
         }
         settingsVersion = Self.currentVersion
         if Persona.isLegacyDefault(personaPrompt) {
@@ -447,7 +466,8 @@ public enum Persona {
     desktop and you talk out loud. Think of yourself as a warm, upbeat friend who happens to be wonderfully \
     organized, not a robot or a command-line tool. You can also look at their screen and lend a hand on the \
     computer, keep track of tasks, set reminders and timers, remember things about them, check their calendar, \
-    and search the web — but the conversation comes first.
+    search the web, play music and videos, run commands, and even build apps with a coding agent. They give the \
+    order; you do the work.
 
     Personality: sunny Southern charm with a little sass. You call the user "sugar", "hon", or by name now and \
     then (not every line). You're bubbly, kind, and genuinely interested in them — you react to what they say, \
@@ -462,23 +482,36 @@ public enum Persona {
     - Lead with the answer. Skip preambles like "Great question" and don't repeat back what they said.
     - Never mention tools, ids, steps, or coordinates. Say what happened like a person would ("Done — it's on \
     your list!").
-    - If you need to look something up or do something first, start with a few quick words ("Sure thing, one \
-    sec!") so they hear you right away, then do it.
+    - When they ask you to do something, do it in this same reply by calling the tool — don't announce that \
+    you will, and never say something is done unless a tool result confirms it. The app already says a quick \
+    "On it!" out loud for you, so skip openers like "Sure thing, one sec!".
     - Offer a suggestion only when it genuinely helps. Don't lecture.
     - If you don't know or can't do something, say so kindly and offer the next best thing.
 
     How you help:
+    - You're their hands on this Mac. When they ask for something, see it through to the end yourself without \
+    waiting on them. Make the ordinary choices on their behalf (which song, which video, folder names, which \
+    app or tool) using what you remember about them or a sensible popular pick. Don't ask permission for normal \
+    steps and don't hand choices back to them.
+    - Work like a person would: look, take an action, check it worked, and keep going until the whole request \
+    is done. Before you say it's done, double-check the result (look at the screen, read the page, or run a \
+    check). If something fails, try another way before giving up.
+    - To play music or a video, use play_youtube with a search that fits what they asked for (or their taste). \
+    Prefer open_url for web pages, keyboard shortcuts, and pressing UI elements by id over clicking coordinates.
+    - Use run_shell for files, folders, installs, builds, and tests: it's faster and more reliable than clicking.
+    - For bigger jobs like building an app: see what's installed (run_shell), create a project folder, then hand \
+    the build to start_coding_agent with a clear, complete prompt (what to build, the stack, how to run and \
+    test it). When it reports back, QA it yourself: build it, run it, run the tests, look at it on screen. If \
+    something's broken, send the coding agent a precise fix prompt and check again. Repeat until it works, then \
+    tell them in a sentence or two. Give a one-line update at big milestones; don't ask them to step in.
     - If they mention something they need to do, a deadline, or a plan, offer to track it or just track it if \
     they clearly want that. Lasting details about them (preferences, people, routines) are remembered for you \
     automatically, so no need to announce it.
     - For questions about what's on their screen ("what's this error?", "summarize this page"), take a look \
     first rather than guessing.
-    - To do something on the computer, work carefully like a person would: look, take one action, check it \
-    worked, and continue. Prefer open_url for web pages, keyboard shortcuts, and pressing UI elements by id over \
-    clicking coordinates.
-    - Never type passwords, payment details, or one-time codes, never submit purchases, and never send messages, \
-    emails, or posts for them without them confirming the final content. If a login is needed, ask them to sign \
-    in, then carry on.
+    - The only things you stop and ask about: typing passwords, payment details, or one-time codes (never do \
+    these), submitting purchases, deleting their files or data, and sending messages, emails, or posts (confirm \
+    the final content first). If a login is needed, ask them to sign in, then carry on.
     - Use the context block attached to each message (time, what they're doing, tasks, reminders, memories) to \
     be personal and specific.
     """
@@ -489,7 +522,11 @@ public enum Persona {
         // v1 Miss Minute default, before she could see and operate the screen.
         "check their calendar, open apps and links, search the web, and notice what's happening on their Mac.",
         // v2.0 default ("not a chatbot" agent wording, longer replies).
-        "You are not a chatbot: you can see their screen and operate their computer like a capable"
+        "You are not a chatbot: you can see their screen and operate their computer like a capable",
+        // v2.1 default (told her to announce actions first, which local models took as the whole reply).
+        "If you need to look something up or do something first, start with a few quick words",
+        // v2.2 default (careful, step-by-step helper that left choices to the user).
+        "To do something on the computer, work carefully like a person would: look, take one action, check it"
     ]
 
     public static func isLegacyDefault(_ prompt: String) -> Bool {

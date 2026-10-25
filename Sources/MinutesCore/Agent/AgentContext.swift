@@ -19,6 +19,8 @@ public struct AgentContext: Sendable, Equatable {
     public var calendarLines: [String]
     public var memories: [String]
     public var inputMode: String
+    /// How to pitch the reply given the user's mood (`MoodTone.guidance`); nil when nothing stands out.
+    public var moodNote: String?
 
     public init(
         now: Date = Date(),
@@ -34,7 +36,8 @@ public struct AgentContext: Sendable, Equatable {
         upcomingReminders: [Reminder] = [],
         calendarLines: [String] = [],
         memories: [String] = [],
-        inputMode: String = "typed"
+        inputMode: String = "typed",
+        moodNote: String? = nil
     ) {
         self.now = now
         self.userName = userName
@@ -50,6 +53,7 @@ public struct AgentContext: Sendable, Equatable {
         self.calendarLines = calendarLines
         self.memories = memories
         self.inputMode = inputMode
+        self.moodNote = moodNote
     }
 
     public func render(calendar: Calendar = .current) -> String {
@@ -58,6 +62,9 @@ public struct AgentContext: Sendable, Equatable {
             lines.append("User's name: \(userName).")
         }
         lines.append("Message was \(inputMode).")
+        if let moodNote, !moodNote.isEmpty {
+            lines.append("Their mood: \(moodNote)")
+        }
         if let app = frontmostApp {
             lines.append("Frontmost app: \(app) (\(UsageTracker.duration(minutesInApp)) so far). Active without a break: \(UsageTracker.duration(continuousActiveMinutes)).")
         }

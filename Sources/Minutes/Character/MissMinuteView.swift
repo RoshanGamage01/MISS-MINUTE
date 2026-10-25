@@ -236,7 +236,7 @@ private func + (a: CGPoint, b: CGPoint) -> CGPoint { CGPoint(x: a.x + b.x, y: a.
 
 // MARK: - Palette
 
-private struct MinutePalette {
+struct MinutePalette {
     var rimTop: Color
     var rimBottom: Color
     var rimStroke: Color
@@ -290,7 +290,7 @@ extension Color {
 
 // MARK: - Renderer
 
-private struct MissMinuteRenderer {
+struct MissMinuteRenderer {
     let t: TimeInterval
     let date: Date
     let mood: CharacterMood

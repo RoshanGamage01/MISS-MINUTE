@@ -225,9 +225,14 @@ public struct OllamaProvider: ChatProvider, Sendable {
             if let text = json["message"]?["content"]?.stringValue, !text.isEmpty {
                 let visible = prompted ? filter.feed(text) : text
                 if !visible.isEmpty { continuation.yield(.textDelta(visible)) }
+                if prompted, let name = filter.startedToolName() {
+                    continuation.yield(.toolCallStarted(name: name))
+                }
             }
             for call in json["message"]?["tool_calls"]?.arrayValue ?? [] {
                 guard let name = call["function"]?["name"]?.stringValue else { continue }
+                // Ollama delivers native calls whole; still announce first so the acknowledgement precedes it.
+                continuation.yield(.toolCallStarted(name: name))
                 var args = call["function"]?["arguments"] ?? .object([:])
                 if let s = args.stringValue, let parsed = JSONValue.parse(s) { args = parsed }
                 sawToolCall = true
@@ -256,6 +261,19 @@ public struct OllamaProvider: ChatProvider, Sendable {
 struct PromptedToolFilter {
     private var full = ""
     private var emitted = 0
+    private var announcedStart = false
+
+    /// The tool's name once a ```tool block has started and its name is readable (reported once), so the
+    /// app can acknowledge before the arguments finish streaming.
+    mutating func startedToolName() -> String? {
+        guard !announcedStart, let fence = full.range(of: "```") else { return nil }
+        let after = String(full[fence.upperBound...])
+        guard let regex = try? NSRegularExpression(pattern: #""(?:name|tool)"\s*:\s*"([^"]+)""#),
+              let match = regex.firstMatch(in: after, range: NSRange(after.startIndex..., in: after)),
+              let range = Range(match.range(at: 1), in: after) else { return nil }
+        announcedStart = true
+        return String(after[range])
+    }
 
     /// Returns the newly visible text.
     mutating func feed(_ chunk: String) -> String {

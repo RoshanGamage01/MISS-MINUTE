@@ -236,6 +236,9 @@ struct AnthropicStreamAssembler {
             }
             blocks[index] = block
             if !order.contains(index) { order.append(index) }
+            if blockType == "tool_use", let name = block["name"] as? String {
+                return [.toolCallStarted(name: name)]
+            }
             return []
 
         case "content_block_delta":

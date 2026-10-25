@@ -28,6 +28,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Build tooling: `Minutes --export-icon <dir>` renders the app icon set and quits.
+        let args = CommandLine.arguments
+        if let flag = args.firstIndex(of: "--export-icon"), flag + 1 < args.count {
+            do {
+                try AppIconExporter.export(to: URL(fileURLWithPath: args[flag + 1]))
+            } catch {
+                FileHandle.standardError.write(Data("Icon export failed: \(error)\n".utf8))
+            }
+            NSApp.terminate(nil)
+            return
+        }
+        // Dev tooling: `Minutes --snapshot-voice-settings <png>` renders the Voice settings tab offscreen and quits.
+        if let flag = args.firstIndex(of: "--snapshot-voice-settings"), flag + 1 < args.count {
+            let path = args[flag + 1]
+            let host = NSHostingView(rootView: VoiceSettingsView().environmentObject(AppModel.shared).frame(width: 640, height: 2_600))
+            let window = NSWindow(contentRect: NSRect(x: -4_000, y: 0, width: 640, height: 2_600), styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host
+            window.orderFrontRegardless()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                host.layoutSubtreeIfNeeded()
+                if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                    host.cacheDisplay(in: host.bounds, to: rep)
+                    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
         NSApp.setActivationPolicy(.accessory)
 
         let model = AppModel.shared
@@ -50,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         behavior.setOrigin = { [weak self] origin in self?.characterController?.setOrigin(origin) }
         behavior.characterSize = { CGFloat(model.settingsStore.settings.characterSize) }
         behavior.settings = { model.settingsStore.settings }
+        behavior.tone = { model.currentTone() }
         behavior.isEngaged = { [weak self] in
             (self?.chatController?.isVisible ?? false)
                 || model.chatService.isStreaming

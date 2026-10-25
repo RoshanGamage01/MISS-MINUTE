@@ -23,13 +23,30 @@ public final class ChatService: ObservableObject {
     @Published public private(set) var activityStatus: String?
     @Published public var mood: CharacterMood = .idle
 
-    /// Computer-use tasks take many observe/act steps.
-    public static let maxStepsPerTurn = 40
+    /// Computer-use and build tasks take many observe/act steps.
+    public static let maxStepsPerTurn = 100
+    /// Words in the first spoken chunk when no punctuation comes sooner.
+    public static let firstChunkWords = 4
+    /// Tools that finish in milliseconds; the real reply follows right away, so no "one sec" first.
+    public static let instantTools: Set<String> = [
+        "add_task", "update_task", "complete_task", "delete_task", "list_tasks",
+        "set_reminder", "list_reminders", "cancel_reminder", "start_timer",
+        "remember", "recall", "forget"
+    ]
+    /// Spoken the moment a slower tool starts, if she hasn't said anything yet.
+    public static let acknowledgements = ["Sure thing, one sec!", "On it, sugar!", "One moment, hon!", "Let me take a look!"]
+    private var acknowledgementIndex = 0
+    /// An instant acknowledgement was spoken for the message about to run (so the model's reply queues after it).
+    private var acknowledgedThisTurn = false
+    /// Whether to speak an instant "On it!" the moment a spoken request arrives (voice on).
+    public var acknowledgeSpokenRequests: () -> Bool = { true }
 
     private let store: JSONFileStore<Conversation>
     private var turnTask: Task<Void, Never>?
     private let reminderParser: ReminderParser
     private var pendingAnnouncements: [ChatMessage] = []
+    /// Background work that finished mid-turn; she picks it up once the current turn ends.
+    private var pendingContinuations: [String] = []
 
     /// Offline fallback when no model is reachable and the text is a plain reminder request.
     public var onReminderParsed: ((ParsedReminder) -> Void)?
@@ -39,6 +56,10 @@ public final class ChatService: ObservableObject {
     public var onReply: ((String) -> Void)?
     /// About to run a tool (lets the app get out of the way of screen actions).
     public var onToolCall: ((ToolCall) -> Void)?
+    /// A message is about to go to the model (warm up the voice while it thinks).
+    public var onWillSend: (() -> Void)?
+    /// The user's words, just before the context block is built (mood tracking, memory lookup).
+    public var onUserMessage: ((String) -> Void)?
     /// The agent turn finished, failed, or was cancelled.
     public var onTurnEnded: (() -> Void)?
     /// A turn completed normally: the user's words, her full reply, and the names of tools she used.
@@ -91,7 +112,7 @@ public final class ChatService: ObservableObject {
             case .system: return false
             case .tool: return message.displaySummary != nil
             case .assistant: return !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            case .user: return true
+            case .user: return message.isHidden != true
             }
         }
     }
@@ -99,7 +120,7 @@ public final class ChatService: ObservableObject {
     public func send(_ userText: String, inputMode: String = "typed") {
         let trimmed = userText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        if isStreaming { cancelStreaming() }
+        if isStreaming { cancelTurn() }
         lastError = nil
 
         // No reachable model? Still handle plain reminder phrases locally.
@@ -115,11 +136,53 @@ public final class ChatService: ObservableObject {
             return
         }
 
-        append(ChatMessage(role: .user, content: trimmed, contextNote: contextProvider(inputMode)))
+        let trace = LatencyTrace.shared
+        // Voice input starts the clock itself, backdated to when the user stopped talking.
+        if inputMode != "spoken" || !trace.isActive { trace.begin(origin: inputMode) }
+        trace.mark(.send)
+        onWillSend?()
+        onUserMessage?(trimmed)
+        var note = contextProvider(inputMode)
+        acknowledgedThisTurn = false
+        // Say something the instant they finish talking; the model's answer follows it.
+        if inputMode == "spoken", acknowledgeSpokenRequests(),
+           let ack = InstantAck.line(for: trimmed, index: acknowledgementIndex) {
+            acknowledgementIndex += 1
+            acknowledgedThisTurn = true
+            trace.mark(.firstChunk)
+            onSpeak?(ack, false)
+            note += "\n(You already said “\(ack)” out loud the moment they finished, so don't open with another acknowledgement.)"
+        }
+        append(ChatMessage(role: .user, content: trimmed, contextNote: note))
         runTurn()
     }
 
+    /// Stops the current turn and drops any queued background follow-ups.
     public func cancelStreaming() {
+        pendingContinuations.removeAll()
+        cancelTurn()
+    }
+
+    /// Picks a task back up without the user (a coding job finished, say). `note` goes to the model as a hidden
+    /// message; if she's busy, it waits until the current turn ends.
+    public func continueWork(_ note: String) {
+        if isStreaming {
+            pendingContinuations.append(note)
+            return
+        }
+        lastError = nil
+        LatencyTrace.shared.begin(origin: "background")
+        append(ChatMessage(role: .user, content: note, contextNote: contextProvider("background"), isHidden: true))
+        runTurn()
+    }
+
+    private func runPendingContinuation() {
+        guard !isStreaming, !pendingContinuations.isEmpty else { return }
+        continueWork(pendingContinuations.removeFirst())
+    }
+
+    private func cancelTurn() {
+        LatencyTrace.shared.cancel()
         turnTask?.cancel()
         turnTask = nil
         if !streamingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -164,12 +227,16 @@ public final class ChatService: ObservableObject {
 
         turnTask = Task { [weak self] in
             guard let self else { return }
-            var spokeSomething = false
+            var spokeSomething = self.acknowledgedThisTurn
+            var nudged = false
+            var pushedToChoose = false
+            var checkedWork = false
             var replyParts: [String] = []
             var toolsUsed: [String] = []
-            let userText = self.conversation.messages.last(where: { $0.role == .user })?.content ?? ""
+            let userText = self.conversation.messages.last(where: { $0.role == .user && $0.isHidden != true })?.content ?? ""
             // Voice each sentence as soon as it's complete; the first one interrupts, the rest queue.
             let speak: (String) -> Void = { sentence in
+                LatencyTrace.shared.mark(.firstChunk)
                 self.onSpeak?(sentence, spokeSomething)
                 spokeSomething = true
             }
@@ -195,17 +262,35 @@ public final class ChatService: ObservableObject {
                     var calls: [ToolCall] = []
                     var stop: TurnStopReason = .other
                     var raw: JSONValue?
-                    // The first spoken chunk can break at a comma so her voice starts as early as possible.
-                    var chunker = SentenceChunker(firstClauseLength: spokeSomething ? nil : 28)
+                    // Until she's said something, the first few words go to the voice straight away.
+                    // (Once something is playing — e.g. the instant "On it!" — whole sentences sound smoother.)
+                    var chunker = SentenceChunker.streaming(firstChunkWords: spokeSomething ? nil : Self.firstChunkWords)
                     self.streamingText = ""
+                    LatencyTrace.shared.mark(.requestSent)
+                    // A tool is about to run: say whatever is pending now, or a quick "one sec" if she hasn't
+                    // spoken yet and the tool isn't instant.
+                    let beforeTool: (String) -> Void = { name in
+                        LatencyTrace.shared.mark(.toolStarted)
+                        if let pending = chunker.flush() { speak(pending) }
+                        if !spokeSomething, !Self.instantTools.contains(name) {
+                            speak(self.nextAcknowledgement())
+                        }
+                        chunker = SentenceChunker.streaming(firstChunkWords: nil)
+                    }
                     for try await event in provider.streamTurn(request) {
                         try Task.checkCancellation()
                         switch event {
                         case .textDelta(let text):
+                            LatencyTrace.shared.mark(.firstToken)
                             self.streamingText += text
                             if self.mood != .talking { self.mood = .talking }
                             chunker.feed(text).forEach(speak)
+                        case .toolCallStarted(let name):
+                            beforeTool(name)
+                            self.mood = .working
                         case .toolCall(let call):
+                            // Providers that only report finished calls (Ollama) still get the acknowledgement.
+                            if calls.isEmpty { beforeTool(call.name) }
                             calls.append(call)
                         case .status(let status):
                             self.activityStatus = status
@@ -245,6 +330,29 @@ public final class ChatService: ObservableObject {
 
                     if stop == .refusal { break }
                     if stop == .pauseTurn { continue }
+                    // Promised or claimed an action without doing it: nudge once to actually do it.
+                    if calls.isEmpty, !nudged, toolsUsed.isEmpty, !self.tools.specs.isEmpty,
+                       let gap = FollowThrough.gap(in: text) {
+                        nudged = true
+                        self.append(ChatMessage(role: .user, content: FollowThrough.nudge(for: gap), isHidden: true))
+                        self.mood = .working
+                        continue
+                    }
+                    // Asked them to pick ("what should I play?") when they'd asked her to just do it.
+                    if calls.isEmpty, !pushedToChoose, !self.tools.specs.isEmpty,
+                       Autonomy.handedBack(reply: text, request: userText) {
+                        pushedToChoose = true
+                        self.append(ChatMessage(role: .user, content: Autonomy.chooseNudge, isHidden: true))
+                        self.mood = .working
+                        continue
+                    }
+                    // Acted but never looked: check the result before calling it done.
+                    if calls.isEmpty, !checkedWork, Autonomy.needsCheck(toolsUsed: toolsUsed) {
+                        checkedWork = true
+                        self.append(ChatMessage(role: .user, content: Autonomy.checkNudge, isHidden: true))
+                        self.mood = .working
+                        continue
+                    }
                     if calls.isEmpty { break }
 
                     self.mood = .working
@@ -276,6 +384,8 @@ public final class ChatService: ObservableObject {
                 self.onExchangeCompleted?(userText, reply, toolsUsed)
                 self.mood = .talking
                 await self.persist()
+                self.runPendingContinuation()
+                guard !self.isStreaming else { return }
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 if !Task.isCancelled, self.mood == .talking { self.mood = .idle }
             } catch {
@@ -287,10 +397,17 @@ public final class ChatService: ObservableObject {
                 self.endTurn()
                 self.mood = .concerned
                 await self.persist()
+                self.runPendingContinuation()
+                guard !self.isStreaming else { return }
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 if self.mood == .concerned { self.mood = .idle }
             }
         }
+    }
+
+    private func nextAcknowledgement() -> String {
+        defer { acknowledgementIndex += 1 }
+        return Self.acknowledgements[acknowledgementIndex % Self.acknowledgements.count]
     }
 
     private func endTurn() {
@@ -307,7 +424,10 @@ public final class ChatService: ObservableObject {
                 conversation.messages[index].content += "\n[\(images.count) screenshot(s) were shown here; take a new one if needed]"
             }
         }
-        if wasStreaming { onTurnEnded?() }
+        if wasStreaming {
+            LatencyTrace.shared.turnEnded()
+            onTurnEnded?()
+        }
         if !pendingAnnouncements.isEmpty {
             conversation.messages.append(contentsOf: pendingAnnouncements)
             pendingAnnouncements.removeAll()
@@ -361,6 +481,10 @@ public final class ChatService: ObservableObject {
         case "open_app", "open_url": return "Opening that for you…"
         case "run_shortcut": return "Running your shortcut…"
         case "get_activity_summary", "get_system_status": return "Taking a look around…"
+        case "play_youtube": return "Finding something to play…"
+        case "run_shell": return "Running a command…"
+        case "start_coding_agent": return "Handing the build to the coding agent…"
+        case "coding_job_status": return "Checking on the build…"
         default: return "Working on it…"
         }
     }

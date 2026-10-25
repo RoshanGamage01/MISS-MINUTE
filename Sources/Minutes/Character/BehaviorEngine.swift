@@ -29,6 +29,8 @@ final class BodyState {
 
 /// Gives Miss Minute a life of her own: she wanders, follows your cursor, hops onto the top of your
 /// windows, dozes off when you're away, wakes when you're back, and reacts when you pet or grab her.
+/// Her mood follows the user's (`MoodTone`): calm and close by when they're stressed, bouncy when they're
+/// winning, quiet and still when it's late.
 @MainActor
 final class BehaviorEngine {
     let body = BodyState()
@@ -42,6 +44,8 @@ final class BehaviorEngine {
     var isEngaged: () -> Bool = { false }
     /// A little line to show/speak (physical reactions). `speak` false = bubble only.
     var onRemark: ((String, _ speak: Bool) -> Void)?
+    /// How the user seems to be doing right now.
+    var tone: () -> MoodTone = { .steady }
 
     private enum Plan {
         case resting(until: Date)
@@ -64,6 +68,8 @@ final class BehaviorEngine {
     private var hoverStart: Date?
     private var lastRemarkAt = Date.distantPast
     private var lastPetAt = Date.distantPast
+    private var currentTone: MoodTone = .steady
+    private var lastToneCheck = Date.distantPast
 
     private let walkSpeed: CGFloat = 95   // points per second
     private let gravity: CGFloat = 2_600
@@ -97,7 +103,8 @@ final class BehaviorEngine {
         body.airborne = true
         wake(silently: true)
         body.express(.surprised, for: 1.2)
-        remark(["Whoa! Where're we goin', sugar?", "Easy now!", "Wheee!"].randomElement()!, speak: false)
+        remark(lines(sassy: ["Whoa! Where're we goin', sugar?", "Easy now!", "Wheee!"],
+                     gentle: ["Oh! Alright, hon, wherever you need me.", "Movin' along with you."]), speak: false)
     }
 
     func dragEnded() {
@@ -136,6 +143,7 @@ final class BehaviorEngine {
         if floorY == nil { floorY = frame.minY; homeX = frame.minX }
 
         refreshIdle(now)
+        refreshTone(now)
         handlePetting(now)
         handleSleep(now, frame: frame)
 
@@ -209,7 +217,8 @@ final class BehaviorEngine {
                 setOrigin(NSPoint(x: frame.minX, y: floor))
                 body.airborne = false
                 plan = .resting(until: now.addingTimeInterval(randomPause()))
-                remark(["Oof! Little help next time?", "Whoa — stuck the landin'!", "Well, that window had other plans."].randomElement()!, speak: false)
+                remark(lines(sassy: ["Oof! Little help next time?", "Whoa — stuck the landin'!", "Well, that window had other plans."],
+                             gentle: ["Whoops, I'm alright!", "Down I come."]), speak: false)
             } else {
                 setOrigin(NSPoint(x: frame.minX, y: y))
                 plan = .falling(velocity: v)
@@ -222,7 +231,33 @@ final class BehaviorEngine {
         let visible = screen.visibleFrame
         let width = frame.width
         let minX = visible.minX, maxX = visible.maxX - width
-        let roll = Double.random(in: 0..<1)
+        var roll = Double.random(in: 0..<1)
+        switch currentTone {
+        case .gentle:
+            // Stay calm and close: mostly drift over near where they're working, no acrobatics.
+            if roll < 0.5 {
+                let mouse = NSEvent.mouseLocation
+                plan = .walking(toX: min(max(mouse.x - width / 2 + CGFloat.random(in: -200...200), minX), maxX))
+            } else {
+                plan = .resting(until: Date().addingTimeInterval(randomPause()))
+            }
+            return
+        case .cozy:
+            // Low-key: fewer outings, mostly resting.
+            if roll < 0.6 {
+                plan = .resting(until: Date().addingTimeInterval(randomPause()))
+                return
+            }
+            roll = Double.random(in: 0..<0.55)
+        case .upbeat:
+            // Bouncy: more hops and happy waves.
+            if roll < 0.25 {
+                body.express([.happy, .wave].randomElement()!, for: 2.0)
+            }
+            roll = roll < 0.5 ? Double.random(in: 0.55..<0.85) : roll
+        case .steady:
+            break
+        }
 
         switch roll {
         case ..<0.38:
@@ -319,7 +354,35 @@ final class BehaviorEngine {
         lastPetAt = now
         wake(silently: true)
         body.express(.happy, for: 2.0)
-        remark(["Hehe, that tickles!", "Aw, you're sweet.", "Well hey there, hon!"].randomElement()!, speak: Bool.random())
+        remark(lines(sassy: ["Hehe, that tickles!", "Aw, you're sweet.", "Well hey there, hon!"],
+                     gentle: ["Deep breath, sugar. You've got this.", "I'm right here with you, hon.", "One thing at a time — we'll sort it out."]),
+               speak: Bool.random())
+    }
+
+    /// Notices mood shifts every few seconds and shows them: a happy wave when things start going well, a
+    /// quiet walk over to keep them company when they get stressed.
+    private func refreshTone(_ now: Date) {
+        guard now.timeIntervalSince(lastToneCheck) > 5 else { return }
+        lastToneCheck = now
+        let tone = tone()
+        guard tone != currentTone else { return }
+        let previous = currentTone
+        currentTone = tone
+        guard !body.asleep, !isEngaged(), settings().liveliness != .still else { return }
+        switch tone {
+        case .upbeat where previous != .upbeat:
+            body.express(.happy, for: 2.2)
+        case .gentle:
+            if case .walking = plan { plan = .resting(until: now.addingTimeInterval(2)) }
+            body.facing = 0
+        default:
+            break
+        }
+    }
+
+    /// Picks a line that fits the mood: playful sass normally, softer words when the user is having a hard time.
+    private func lines(sassy: [String], gentle: [String]) -> String {
+        (currentTone.sass < 0.35 ? gentle : sassy).randomElement()!
     }
 
     private func remark(_ line: String, speak: Bool) {
@@ -329,7 +392,13 @@ final class BehaviorEngine {
     }
 
     private func randomPause() -> TimeInterval {
-        Double.random(in: settings().liveliness.pauseRange)
+        let pause = Double.random(in: settings().liveliness.pauseRange)
+        // Calmer moods mean longer, stiller pauses; good moods a bit more bustle.
+        switch currentTone {
+        case .gentle, .cozy: return pause * 1.6
+        case .upbeat: return pause * 0.8
+        case .steady: return pause
+        }
     }
 }
 
