@@ -109,12 +109,16 @@ In Minutes Settings, choose **Ollama (local)**, click **Refresh**, and pick a mo
 
 ## Features
 
-1. **Floating character** — borderless, transparent, always-on-top, draggable; idle / thinking / talking animations; click to open chat.
+1. **Floating character** — original SwiftUI clock art (not Marvel IP); dark-mode aware; idle / thinking / talking animations; click to open chat.
 2. **Menu bar** — Open Chat, Settings, Quit; optional **Launch at login** via `SMAppService` (best with a real `.app` bundle).
 3. **Global hotkey** — default **⌥Space** toggles the chat panel.
-4. **Chat** — streaming replies, persisted history, editable cheerful persona (time-aware Southern charm).
-5. **Providers** — protocol-based `ChatProvider` + `ChatProviderFactory`; add new backends by conforming and registering.
-6. **Reminders** — natural language (“remind me in 20 minutes to…”) or Settings list; `UserNotifications` + in-character announcement; optional periodic check-in nudge.
+4. **Chat + voice** — streaming replies, persisted history, spoken with macOS enhanced/premium voices (`AVSpeechSynthesizer`).
+5. **Awareness** — watches app switches, finished builds/commands (`swift`, `xcodebuild`, `npm`, …), idle return, display wake; speaks up without waiting for a typed prompt.
+6. **Providers** — OpenAI / Anthropic / xAI / Ollama via `ChatProvider`.
+7. **Reminders** — natural language or Settings list; notifications + spoken announcement.
+8. **Appearance** — System / Light / Dark.
+
+Install natural voices: **System Settings → Accessibility → Spoken Content → System Voice → Manage Voices…** (download Enhanced/Premium English voices).
 
 ## Tests
 

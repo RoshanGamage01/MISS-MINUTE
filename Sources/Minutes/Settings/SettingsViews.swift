@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 import MinutesCore
 
@@ -226,8 +227,6 @@ struct VoiceSettingsView: View {
         return "\(voice.name) · \(voice.language) · \(quality)"
     }
 }
-
-import AVFoundation
 
 struct AwarenessSettingsView: View {
     @EnvironmentObject private var appModel: AppModel
