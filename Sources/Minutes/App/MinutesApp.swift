@@ -70,6 +70,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.notificationManager?.deliver(reminder: reminder)
             self?.characterController?.flashAnnounce()
         }
+        model.onProactiveAlert = { [weak self] in
+            self?.characterController?.flashAnnounce()
+        }
 
         characterController?.onCharacterClicked = { [weak self] in
             self?.toggleChat()

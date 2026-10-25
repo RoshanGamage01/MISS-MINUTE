@@ -21,6 +21,8 @@ public final class ChatService: ObservableObject {
     private let reminderParser: ReminderParser
 
     public var onReminderParsed: ((ParsedReminder) -> Void)?
+    /// Fired for assistant lines that should be spoken (replies, announcements, reminders).
+    public var onSpeak: ((String) -> Void)?
     public var providerFactory: () throws -> any ChatProvider
     public var settingsProvider: () -> AppSettings
 
@@ -64,6 +66,7 @@ public final class ChatService: ObservableObject {
             append(role: .user, content: trimmed)
             append(role: .assistant, content: confirmation)
             mood = .announcing
+            onSpeak?(confirmation)
             Task { await persist() }
             return
         }
@@ -83,10 +86,15 @@ public final class ChatService: ObservableObject {
         mood = .idle
     }
 
-    public func announce(_ text: String) {
+    public func announce(_ text: String, speak: Bool = true) {
         append(role: .assistant, content: text)
         mood = .announcing
-        Task { await persist() }
+        if speak { onSpeak?(text) }
+        Task {
+            await persist()
+            try? await Task.sleep(nanoseconds: 2_400_000_000)
+            if self.mood == .announcing { self.mood = .idle }
+        }
     }
 
     private func streamAssistantReply() {
@@ -125,8 +133,11 @@ public final class ChatService: ObservableObject {
                         self.mood = .idle
                     } else {
                         self.append(role: .assistant, content: finalText)
-                        self.mood = .idle
+                        self.mood = .talking
+                        self.onSpeak?(finalText)
                         await self.persist()
+                        try? await Task.sleep(nanoseconds: 1_200_000_000)
+                        if !Task.isCancelled { self.mood = .idle }
                     }
                 }
             } catch {

@@ -40,6 +40,10 @@ struct SettingsRootView: View {
                 .tabItem { Label("Provider", systemImage: "cpu") }
             PersonaSettingsView()
                 .tabItem { Label("Persona", systemImage: "text.bubble") }
+            VoiceSettingsView()
+                .tabItem { Label("Voice", systemImage: "speaker.wave.2") }
+            AwarenessSettingsView()
+                .tabItem { Label("Awareness", systemImage: "eye") }
             CharacterSettingsView()
                 .tabItem { Label("Character", systemImage: "clock") }
             ReminderSettingsView()
@@ -48,7 +52,10 @@ struct SettingsRootView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
         }
         .padding(16)
-        .frame(minWidth: 480, minHeight: 520)
+        .frame(minWidth: 520, minHeight: 560)
         .environmentObject(appModel)
+        .preferredColorScheme(
+            MinutesTheme.preferredColorScheme(for: appModel.settingsStore.settings.appearance)
+        )
     }
 }

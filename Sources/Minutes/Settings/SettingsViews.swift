@@ -157,6 +157,153 @@ struct PersonaSettingsView: View {
     }
 }
 
+struct VoiceSettingsView: View {
+    @EnvironmentObject private var appModel: AppModel
+
+    var body: some View {
+        Form {
+            Section("Speech") {
+                Toggle("Speak replies and alerts", isOn: voiceEnabledBinding)
+                Text("Uses macOS enhanced/premium voices when installed (System Settings → Accessibility → Spoken Content).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("Voice", selection: voiceIDBinding) {
+                    Text("Automatic (best available)").tag("")
+                    ForEach(appModel.speech.availableVoices, id: \.identifier) { voice in
+                        Text(Self.label(for: voice)).tag(voice.identifier)
+                    }
+                }
+                .disabled(!appModel.settingsStore.settings.voiceEnabled)
+                HStack {
+                    Text("Pace")
+                    Slider(value: rateBinding, in: 0.4...0.65, step: 0.01)
+                }
+                .disabled(!appModel.settingsStore.settings.voiceEnabled)
+                Button("Preview voice") {
+                    appModel.speech.refreshVoices()
+                    appModel.speech.previewCurrentVoice()
+                }
+                .disabled(!appModel.settingsStore.settings.voiceEnabled)
+            }
+        }
+        .onAppear { appModel.speech.refreshVoices() }
+    }
+
+    private var voiceEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { appModel.settingsStore.settings.voiceEnabled },
+            set: { newValue in
+                Task { await appModel.updateSettings { $0.voiceEnabled = newValue } }
+            }
+        )
+    }
+
+    private var voiceIDBinding: Binding<String> {
+        Binding(
+            get: { appModel.settingsStore.settings.voiceIdentifier },
+            set: { newValue in
+                Task { await appModel.updateSettings { $0.voiceIdentifier = newValue } }
+            }
+        )
+    }
+
+    private var rateBinding: Binding<Double> {
+        Binding(
+            get: { appModel.settingsStore.settings.speechRate },
+            set: { newValue in
+                Task { await appModel.updateSettings { $0.speechRate = newValue } }
+            }
+        )
+    }
+
+    private static func label(for voice: AVSpeechSynthesisVoice) -> String {
+        let quality: String
+        switch voice.quality {
+        case .premium: quality = "Premium"
+        case .enhanced: quality = "Enhanced"
+        default: quality = "Standard"
+        }
+        return "\(voice.name) · \(voice.language) · \(quality)"
+    }
+}
+
+import AVFoundation
+
+struct AwarenessSettingsView: View {
+    @EnvironmentObject private var appModel: AppModel
+
+    var body: some View {
+        Form {
+            Section("Background awareness") {
+                Toggle("Watch what I'm doing", isOn: monitoringBinding)
+                Text("Minutes notices app switches, long builds/commands finishing, idle return, and display wake—then speaks up. No keylogging or screen capture.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("Announce app switches", isOn: appSwitchBinding)
+                    .disabled(!appModel.settingsStore.settings.activityMonitoringEnabled)
+                Toggle("Announce finished builds & tasks", isOn: processBinding)
+                    .disabled(!appModel.settingsStore.settings.activityMonitoringEnabled)
+                Toggle("Welcome me back after idle", isOn: idleBinding)
+                    .disabled(!appModel.settingsStore.settings.activityMonitoringEnabled)
+                Toggle("Smart AI reactions (uses your provider)", isOn: smartBinding)
+                    .disabled(!appModel.settingsStore.settings.activityMonitoringEnabled)
+            }
+            if let summary = appModel.latestActivitySummary {
+                Section("Last noticed") {
+                    Text(summary)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var monitoringBinding: Binding<Bool> {
+        Binding(
+            get: { appModel.settingsStore.settings.activityMonitoringEnabled },
+            set: { newValue in
+                Task { await appModel.updateSettings { $0.activityMonitoringEnabled = newValue } }
+            }
+        )
+    }
+
+    private var appSwitchBinding: Binding<Bool> {
+        Binding(
+            get: { appModel.settingsStore.settings.announceAppSwitches },
+            set: { newValue in
+                Task { await appModel.updateSettings { $0.announceAppSwitches = newValue } }
+            }
+        )
+    }
+
+    private var processBinding: Binding<Bool> {
+        Binding(
+            get: { appModel.settingsStore.settings.announceProcessCompletions },
+            set: { newValue in
+                Task { await appModel.updateSettings { $0.announceProcessCompletions = newValue } }
+            }
+        )
+    }
+
+    private var idleBinding: Binding<Bool> {
+        Binding(
+            get: { appModel.settingsStore.settings.announceIdleReturn },
+            set: { newValue in
+                Task { await appModel.updateSettings { $0.announceIdleReturn = newValue } }
+            }
+        )
+    }
+
+    private var smartBinding: Binding<Bool> {
+        Binding(
+            get: { appModel.settingsStore.settings.smartActivityReactions },
+            set: { newValue in
+                Task { await appModel.updateSettings { $0.smartActivityReactions = newValue } }
+            }
+        )
+    }
+}
+
 struct CharacterSettingsView: View {
     @EnvironmentObject private var appModel: AppModel
 
@@ -175,6 +322,9 @@ struct CharacterSettingsView: View {
                         .monospacedDigit()
                         .frame(width: 36, alignment: .trailing)
                 }
+                Text("Original Minutes clock art — not affiliated with Marvel or Disney.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -283,6 +433,14 @@ struct GeneralSettingsView: View {
 
     var body: some View {
         Form {
+            Section("Appearance") {
+                Picker("Theme", selection: appearanceBinding) {
+                    ForEach(AppearanceMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
             Section("Hotkey") {
                 Text("Toggle chat: \(appModel.settingsStore.settings.hotKey.displayString)")
                 Text("Default is ⌥Space. Change key codes in settings.json if needed.")
@@ -304,6 +462,15 @@ struct GeneralSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    private var appearanceBinding: Binding<AppearanceMode> {
+        Binding(
+            get: { appModel.settingsStore.settings.appearance },
+            set: { newValue in
+                Task { await appModel.updateSettings { $0.appearance = newValue } }
+            }
+        )
     }
 
     private var launchBinding: Binding<Bool> {

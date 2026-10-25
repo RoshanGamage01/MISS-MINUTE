@@ -6,6 +6,7 @@ struct ClockCharacterView: View {
     var mood: CharacterMood
     var size: CGFloat
     var isChatOpen: Bool
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var bounce = false
     @State private var blink = false
@@ -16,9 +17,16 @@ struct ClockCharacterView: View {
 
     var body: some View {
         ZStack {
+            if colorScheme == .dark {
+                Circle()
+                    .fill(Color.orange.opacity(0.16))
+                    .frame(width: size * 0.9, height: size * 0.9)
+                    .blur(radius: 12)
+            }
+
             // Soft ground shadow
             Ellipse()
-                .fill(Color.black.opacity(0.18))
+                .fill(Color.black.opacity(colorScheme == .dark ? 0.35 : 0.18))
                 .frame(width: size * 0.55, height: size * 0.1)
                 .offset(y: size * 0.42)
                 .scaleEffect(x: bounce ? 1.05 : 0.95, y: 1)
@@ -86,7 +94,11 @@ struct ClockCharacterView: View {
                     Circle()
                         .stroke(Color(red: 0.72, green: 0.45, blue: 0.12), lineWidth: size * 0.045)
                 )
-                .shadow(color: .black.opacity(0.2), radius: 6, y: 3)
+                .shadow(color: .black.opacity(colorScheme == .dark ? 0.45 : 0.2), radius: colorScheme == .dark ? 10 : 6, y: 3)
+                .overlay(
+                    Circle()
+                        .stroke(Color.white.opacity(colorScheme == .dark ? 0.14 : 0), lineWidth: 1)
+                )
                 .frame(width: size * 0.72, height: size * 0.72)
 
             // Tick marks

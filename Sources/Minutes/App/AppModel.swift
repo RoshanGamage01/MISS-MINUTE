@@ -10,12 +10,15 @@ final class AppModel: ObservableObject {
     let settingsStore = SettingsStore()
     let reminderStore = ReminderStore()
     let keychain = MacKeychainStore(service: "com.minutes.app")
+    let speech = SpeechManager.shared
+    let activityMonitor = ActivityMonitor()
     lazy var apiKeys = KeychainAPIKeyProvider(keychain: keychain)
 
     @Published var chatPanelOpen = false
     @Published var availableModels: [String] = []
     @Published var modelsError: String?
     @Published var isLoadingModels = false
+    @Published var latestActivitySummary: String?
 
     private(set) lazy var chatService: ChatService = {
         ChatService(
@@ -34,10 +37,13 @@ final class AppModel: ObservableObject {
     var onCharacterPositionChanged: (() -> Void)?
     var onHotKeyChanged: (() -> Void)?
     var onReminderFired: ((Reminder) -> Void)?
+    var onProactiveAlert: (() -> Void)?
 
     private var nudgeTimer: Timer?
     private var lastNudgeAt: Date?
+    private var lastProactiveAt: Date = .distantPast
     private var cancellables = Set<AnyCancellable>()
+    private var smartReactionTask: Task<Void, Never>?
 
     private init() {
         settingsStore.objectWillChange
@@ -46,21 +52,32 @@ final class AppModel: ObservableObject {
         reminderStore.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        speech.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     func bootstrap() async {
         await settingsStore.load()
         await reminderStore.load()
         await chatService.load()
+        migrateLegacyPersonaIfNeeded()
 
         chatService.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
+        speech.configure(settingsProvider: { [weak self] in
+            self?.settingsStore.settings ?? .default
+        })
+
         chatService.onReminderParsed = { [weak self] parsed in
             Task { @MainActor in
                 await self?.reminderStore.add(parsed: parsed)
             }
+        }
+        chatService.onSpeak = { [weak self] text in
+            self?.speech.speak(text)
         }
         reminderStore.onFire = { [weak self] reminder in
             let line = "Tick-tock — reminder time: \(reminder.text)"
@@ -68,9 +85,30 @@ final class AppModel: ObservableObject {
             self?.onReminderFired?(reminder)
         }
 
+        activityMonitor.configure(settingsProvider: { [weak self] in
+            self?.settingsStore.settings ?? .default
+        })
+        activityMonitor.onEvent = { [weak self] event in
+            self?.handleActivity(event)
+        }
+        if settingsStore.settings.activityMonitoringEnabled {
+            activityMonitor.start()
+        }
+
         applyLaunchAtLogin()
         restartNudgeTimer()
         await refreshModels()
+
+        // Warm greeting once per launch (spoken, not chatty).
+        let hour = Calendar.current.component(.hour, from: Date())
+        let hello: String
+        switch hour {
+        case 5..<12: hello = "Mornin'! Minutes here—I'll keep an eye on things."
+        case 12..<17: hello = "Afternoon. I'm watchin' your Mac—holler if you need me."
+        case 17..<22: hello = "Evenin'. I'll pipe up when something finishes."
+        default: hello = "Still tickin'. I'll keep watch while you work."
+        }
+        speech.speak(hello)
     }
 
     func makeProvider() throws -> any ChatProvider {
@@ -105,6 +143,13 @@ final class AppModel: ObservableObject {
         if before.hotKey != after.hotKey {
             onHotKeyChanged?()
         }
+        if before.activityMonitoringEnabled != after.activityMonitoringEnabled {
+            if after.activityMonitoringEnabled {
+                activityMonitor.start()
+            } else {
+                activityMonitor.stop()
+            }
+        }
         if before.provider != after.provider
             || before.ollamaBaseURL != after.ollamaBaseURL
             || before.periodicNudgeEnabled != after.periodicNudgeEnabled
@@ -113,6 +158,9 @@ final class AppModel: ObservableObject {
         }
         if before.provider != after.provider || before.ollamaBaseURL != after.ollamaBaseURL {
             await refreshModels()
+        }
+        if !after.voiceEnabled {
+            speech.stop()
         }
     }
 
@@ -141,6 +189,74 @@ final class AppModel: ObservableObject {
         (try? apiKeys.apiKey(for: kind)?.isEmpty == false) ?? false
     }
 
+    func handleActivity(_ event: ActivityEvent) {
+        // Avoid stacking alerts.
+        guard Date().timeIntervalSince(lastProactiveAt) > 12 else { return }
+
+        // Sleep can stay silent in chat; wake/process/idle/app matter more.
+        if case .screenDidSleep = event { return }
+
+        lastProactiveAt = Date()
+        latestActivitySummary = event.summary
+
+        let settings = settingsStore.settings
+        if settings.smartActivityReactions {
+            smartReactionTask?.cancel()
+            smartReactionTask = Task { [weak self] in
+                await self?.speakSmartReaction(for: event)
+            }
+        } else {
+            let line = ActivityCopy.line(for: event)
+            chatService.announce(line)
+            onProactiveAlert?()
+        }
+    }
+
+    private func speakSmartReaction(for event: ActivityEvent) async {
+        let fallback = ActivityCopy.line(for: event)
+        do {
+            let provider = try makeProvider()
+            let settings = settingsStore.settings
+            let prompt = """
+            \(settings.personaPrompt)
+
+            \(Persona.timeAwarePrefix())
+
+            Desktop event: \(event.summary)
+            Reply with ONE short spoken line (max 22 words). No quotes, no markdown.
+            """
+            var assembled = ""
+            let stream = provider.streamChat(
+                messages: [ChatMessage(role: .user, content: "React to that desktop event.")],
+                model: settings.model,
+                systemPrompt: prompt
+            )
+            for try await chunk in stream {
+                if Task.isCancelled { return }
+                assembled += chunk
+                if assembled.count > 160 { break }
+            }
+            let line = assembled.trimmingCharacters(in: .whitespacesAndNewlines)
+            let finalLine = line.isEmpty ? fallback : line
+            guard !Task.isCancelled else { return }
+            chatService.announce(finalLine)
+            onProactiveAlert?()
+        } catch {
+            chatService.announce(fallback)
+            onProactiveAlert?()
+        }
+    }
+
+    private func migrateLegacyPersonaIfNeeded() {
+        let current = settingsStore.settings.personaPrompt
+        // If the user never customized persona, refresh to the proactive default.
+        if current.contains("You are Minutes, a cheerful desktop helper with a light Southern charm") {
+            Task {
+                await updateSettings { $0.personaPrompt = Persona.defaultPrompt }
+            }
+        }
+    }
+
     private func applyLaunchAtLogin() {
         let enabled = settingsStore.settings.launchAtLogin
         do {
@@ -150,7 +266,6 @@ final class AppModel: ObservableObject {
                 try SMAppService.mainApp.unregister()
             }
         } catch {
-            // Launch-at-login requires a proper app bundle; ignore failures in `swift run`.
             print("Launch at login update failed: \(error.localizedDescription)")
         }
     }
