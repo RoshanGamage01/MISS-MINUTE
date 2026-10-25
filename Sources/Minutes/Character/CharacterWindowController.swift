@@ -53,7 +53,7 @@ final class CharacterWindowController: NSObject {
         guard let window, let appModel else { return }
         let size = CGFloat(appModel.settingsStore.settings.characterSize) + 20
         window.setContentSize(NSSize(width: size, height: size))
-        if let hosting, let appModel {
+        if let hosting {
             hosting.rootView = CharacterRootView(
                 appModel: appModel,
                 chatService: appModel.chatService,
