@@ -4,6 +4,25 @@ A personal AI agent for macOS, built around Miss Minute from *Loki*: a holograph
 
 > **Fan project for personal use.** Miss Minute and the TVA belong to Marvel/Disney. This project isn't affiliated with them; don't distribute it.
 
+## Working on her own
+
+She doesn't only wait for commands. About once a minute, when you aren't talking to her, she looks around (Downloads, Desktop, free disk space, the next few hours of your calendar, overdue tasks, apps you haven't touched today, and any open goals). She weighs what's worth doing, then **does it**, **offers it**, or **lets it be**.
+
+- **Goals.** Give her something bigger ("get my Downloads organized", "set up a Python project and get its tests passing") in chat or in the **Mind** tab. She plans it as steps (`start_goal`) and ticks them off (`update_goal`). Goals persist, so if one stalls or gets interrupted she picks it back up when you next pause. After 6 tries she asks you for help instead.
+- **Her own ideas.** She can tidy a cluttered folder (`mkdir` + `mv -n`, never overwriting or deleting), get you ready for a meeting that starts in 5–25 minutes, or find what's eating your disk. Overdue tasks and idle apps are always *offered*, because those are your call.
+- **How much she does alone** (Settings → Awareness, or the Mind tab): *Off*, *Suggest* (look and offer only), *Safe* (default: tasks, reminders, opening apps, tidying files), or *Trusted* (also commands and app control while you're away). At every level, sending, paying, and deleting wait for you. She also has a daily cap on things she does herself.
+- **Seeing her think.** The **Mind** tab shows your open goals with step checklists, plus a live stream of what she noticed, weighed, decided, did, and held back from. Every line is also written to `~/Library/Application Support/Minutes/thoughts.log`. Open goals appear in the menu-bar menu too.
+- **You come first.** She only starts when she isn't talking, listening, or running a build. Any message from you pauses her work, and she won't touch the mouse or keyboard until you've been idle for 2 minutes.
+
+## Watching background coding jobs
+
+When she hands a build to Claude Code or Cursor's agent, the job's live `stream-json` output is turned into short steps ("Reading Mood.swift", "Writing tests for Mood.swift", "Fixing Autonomy.swift", "Running the tests"):
+
+- **Chat panel:** a strip above the message box shows each running job, how long it's been going, and the current step. Click it to see the last 8 steps and her notes, or open the full log. When she's idle, the header shows the step too.
+- **Menu bar:** the clock icon gets a dot while a job runs. The tooltip and the top of the menu show the current step, and **Open Coding Log** opens the log file.
+- **Bubble:** while the chat panel is closed and she isn't talking, she pops a "Still on todo-app: running the tests…" line no more than once every 75 seconds or so. You can turn this off in Settings → Computer → *Narrate coding jobs in her bubble*.
+- **Log files:** `~/Library/Logs/Miss Minute/coding-<date>-<project>.log` has every step with a timestamp. Her `coding_job_status` tool reads the latest steps too, so you can ask her "how's the build going?"
+
 ## New in 2.1: friendlier, faster, remembers on her own
 
 - **Starts talking right away.** Her voice kicks in at the first natural pause instead of waiting for a full sentence. On local models (Ollama), quick replies skip the silent "thinking" phase, and the model is loaded at launch so the first answer isn't stuck behind a cold start. ElevenLabs now defaults to its low-latency Flash model and streaming endpoint, and upcoming lines render further ahead.
@@ -52,6 +71,25 @@ Drawn live in SwiftUI `Canvas` at 30 fps, no image assets:
 - **Hologram skin** (default): translucent amber with glow, scanlines, a travelling light sweep, flicker, occasional signal tears, and a projector beam. **Classic** skin is a solid cartoon finish.
 - A speech bubble types out what she says next to her. Click her to chat, right-click for Talk / Brief me / Settings, drag to move.
 
+### Body language driven by the agent
+
+Her body follows what the agent is doing (`BodyDirector` in MinutesCore maps agent events to cues; `BehaviorEngine.perform(_:)` carries them out):
+
+| What she's doing | Body |
+| --- | --- |
+| `look_at_screen` / `read_screen` | Perches on the front window, hand shading her eyes (**peer**) |
+| `click` / `scroll` / `drag` | Glides to just beside the exact spot and **points** at it |
+| `open_app` / `focus_app` / `open_url` / `browser` | **Teleports** through a TVA time door onto the new app's window |
+| `search_web`, `recall`, calendar… | Chin-tap **think** gesture with a thought bubble |
+| `run_shell`, `start_coding_agent`, a coding job running | **Focused** look: heavy lids, set brows, cyan glow, `</>` orbiting |
+| Thinking / running tools | **Processing** halo turning around her rim |
+| Tasks/reminders saved, a turn that acted | **Thumbs up** |
+| `complete_task`, a coding job that succeeds | **Celebrate**: arms up, bouncing, confetti, golden glow |
+| A tool error, failed turn or failed job | **Shrug** with a red alert pulse |
+| A reply that names a file or path | **Points** at the front window |
+
+When the work is done she floats back home. She won't travel while you're dragging her, for 90 s after you place her, or with Liveliness set to *Stay put*. *Calm* swaps teleports for glides. Gestures and glows always play.
+
 ## Requirements
 
 - macOS 14 Sonoma or later
@@ -99,6 +137,9 @@ Try: *"Brief me."*, *"I need to send the invoice by Friday at 5."*, *"Start a 25
 ```
 Sources/MinutesCore/            Testable core (no AppKit)
   Agent/                        Agent loop types, tool registry, core tools, context snapshot, transcript rules
+    AutonomyPolicy              Risk of each tool call; what she may do unasked (enforced before every call)
+    Initiative                  World snapshot → opportunities → scored decision (act / offer / skip)
+    Goals, ThoughtLog           Multi-step goals + goal tools; her inner monologue and thoughts.log
   Chat/ChatService.swift        The agent loop: stream → tool calls → results → … → spoken reply
   Providers/                    Anthropic (raw SSE + tool use), OpenAI-compatible, Ollama
   Tasks/ Memory/ Reminders/     Persistent stores
@@ -110,12 +151,13 @@ Sources/Minutes/                macOS app
   Computer/                     Screen capture, Accessibility reader, mouse/keyboard, browser bridge,
                                 ComputerController (tools + approval gate), ScreenWatcher (always aware)
   Proactive/ProactiveEngine     When and why she speaks up
+  Proactive/AutonomyLoop        Observe → decide → act loop for work she starts herself
   Chat/ Settings/ MenuBar/ Hotkey/ Notifications/
 ```
 
 **History is append-only.** Situational context is stored on each user message instead of in the system prompt, so the system prompt and tool list never change between requests. That keeps prompt caching warm and keeps Claude's thinking blocks valid inside a tool loop. Raw provider blocks (thinking signatures, search results) are replayed only within the current turn and dropped afterwards.
 
-Data lives in `~/Library/Application Support/Minutes/` (`settings.json`, `conversation.json`, `tasks.json`, `memory.json`, `reminders.json`, `usage.json`). API keys live only in the Keychain.
+Data lives in `~/Library/Application Support/Minutes/` (`settings.json`, `conversation.json`, `tasks.json`, `memory.json`, `reminders.json`, `usage.json`, `goals.json`, `thoughts.json`, `thoughts.log`). API keys live only in the Keychain.
 
 ## Adding a tool
 

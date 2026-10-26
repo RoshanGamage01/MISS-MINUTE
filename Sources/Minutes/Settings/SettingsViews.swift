@@ -618,6 +618,24 @@ struct AwarenessSettingsView: View {
                 Toggle("Write remarks with AI (uses your provider)", isOn: appModel.setting(\.smartActivityReactions))
             }
 
+            Section("Working on her own") {
+                Picker("Autonomy", selection: appModel.setting(\.autonomyLevel)) {
+                    ForEach(AutonomyLevel.allCases) { Text($0.displayName).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Text(settings.autonomyLevel.explanation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Stepper("At most \(settings.autonomyDailyActions) things on her own a day",
+                        value: appModel.setting(\.autonomyDailyActions), in: 1...50)
+                    .disabled(settings.autonomyLevel == .off || settings.autonomyLevel == .suggest)
+                Text("She looks around every minute (Downloads, Desktop, disk space, calendar, tasks, open goals) and only starts something when you're not talking to her. Every decision is in the Mind tab and in thoughts.log.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Section("What she watches") {
                 Toggle("Notice what I'm doing", isOn: appModel.setting(\.activityMonitoringEnabled))
                 Text("App focus time, long builds/commands finishing, idle time, and display wake. No keylogging, no screen capture, nothing leaves your Mac except the context sent with your own messages.")
@@ -654,6 +672,8 @@ struct AwarenessSettingsView: View {
 
 struct CharacterSettingsView: View {
     @EnvironmentObject private var appModel: AppModel
+    /// Kept across redraws so the preview twirls and cross-fades into a newly picked outfit.
+    @State private var previewBody = BodyState()
 
     var body: some View {
         let settings = appModel.settingsStore.settings
@@ -663,6 +683,12 @@ struct CharacterSettingsView: View {
                     ForEach(CharacterSkin.allCases) { Text($0.displayName).tag($0) }
                 }
                 .pickerStyle(.segmented)
+                Picker("Outfit", selection: appModel.setting(\.avatarLook)) {
+                    ForEach(AvatarLook.allCases) { Text($0.displayName).tag($0) }
+                }
+                Text("You can also just ask her: \"change into your night look\", \"go formal\", \"back to normal\".")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 HStack {
                     Spacer()
                     MissMinuteView(
@@ -671,7 +697,9 @@ struct CharacterSettingsView: View {
                         skin: settings.characterSkin,
                         isHovering: false,
                         mouthLevel: { _ in 0 },
-                        gazeTarget: { .zero }
+                        gazeTarget: { .zero },
+                        bodyState: previewBody,
+                        look: settings.avatarLook
                     )
                     .background(
                         RoundedRectangle(cornerRadius: 12).fill(Color.black.opacity(0.85))
@@ -853,6 +881,11 @@ struct ComputerSettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 Text("She clicks, types, runs commands, plays music, drives your browser, and hands builds to a coding agent (Claude Code or Cursor) to get tasks done on her own. “Ask first” asks once per task. She never types passwords or payment details, and checks with you before sending messages, buying, or deleting your files. Press ⌥Esc to stop her anytime.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("Narrate coding jobs in her bubble", isOn: appModel.setting(\.narrateCodingProgress))
+                Text("While a coding job runs, the chat panel and menu bar show each step live (and a log is saved). With this on, she also pops a short update in her bubble every minute or so.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

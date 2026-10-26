@@ -17,6 +17,8 @@ public struct AgentContext: Sendable, Equatable {
     public var openTasks: [TrackedTask]
     public var upcomingReminders: [Reminder]
     public var calendarLines: [String]
+    /// Multi-step goals still open (hers and the user's).
+    public var goals: [Goal]
     public var memories: [String]
     public var inputMode: String
     /// How to pitch the reply given the user's mood (`MoodTone.guidance`); nil when nothing stands out.
@@ -35,6 +37,7 @@ public struct AgentContext: Sendable, Equatable {
         openTasks: [TrackedTask] = [],
         upcomingReminders: [Reminder] = [],
         calendarLines: [String] = [],
+        goals: [Goal] = [],
         memories: [String] = [],
         inputMode: String = "typed",
         moodNote: String? = nil
@@ -51,6 +54,7 @@ public struct AgentContext: Sendable, Equatable {
         self.openTasks = openTasks
         self.upcomingReminders = upcomingReminders
         self.calendarLines = calendarLines
+        self.goals = goals
         self.memories = memories
         self.inputMode = inputMode
         self.moodNote = moodNote
@@ -103,6 +107,11 @@ public struct AgentContext: Sendable, Equatable {
         if !calendarLines.isEmpty {
             lines.append("Calendar (next 24h):")
             lines.append(contentsOf: calendarLines.prefix(8).map { "- \($0)" })
+        }
+        let openGoals = goals.filter(\.isOpen)
+        if !openGoals.isEmpty {
+            lines.append("Goals in progress:")
+            lines.append(contentsOf: openGoals.prefix(5).map { "- \($0.summaryLine)" })
         }
         if !capabilityNotes.isEmpty {
             lines.append(contentsOf: capabilityNotes)

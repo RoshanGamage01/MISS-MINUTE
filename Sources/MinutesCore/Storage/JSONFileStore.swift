@@ -62,4 +62,17 @@ public enum MinutesPaths {
     public static var usageURL: URL {
         applicationSupport.appendingPathComponent("usage.json")
     }
+
+    public static var goalsURL: URL {
+        applicationSupport.appendingPathComponent("goals.json")
+    }
+
+    public static var thoughtsURL: URL {
+        applicationSupport.appendingPathComponent("thoughts.json")
+    }
+
+    /// Plain-text audit trail of everything she decided and did on her own.
+    public static var thoughtsLogURL: URL {
+        applicationSupport.appendingPathComponent("thoughts.log")
+    }
 }

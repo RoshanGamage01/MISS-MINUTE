@@ -83,7 +83,7 @@ enum WorkTools {
 
             AgentTool(spec: .object(
                 "coding_job_status",
-                "See running and finished coding jobs and the latest output of one.",
+                "See running and finished coding jobs: what a running one is doing right now (its latest steps), or the report of a finished one.",
                 properties: ["job": ["type": "integer", "description": "Job number (default: the latest)."]]
             )) { args in
                 .ok(coding.status(of: args["job"]?.intValue))
@@ -111,10 +111,11 @@ enum ShellSafety {
     }
 }
 
-/// Runs a headless coding agent (Claude Code or cursor-agent) in a project folder and reports back when it's done.
+/// Runs a headless coding agent (Claude Code or cursor-agent) in a project folder, streams what it's doing as it goes,
+/// and reports back when it's done.
 @MainActor
-final class CodingAgentRunner {
-    struct Job {
+final class CodingAgentRunner: ObservableObject {
+    struct Job: Identifiable {
         var id: Int
         var dir: URL
         var agent: String
@@ -124,14 +125,35 @@ final class CodingAgentRunner {
         var output = ""
         /// How many jobs have run in this folder this session (this one included).
         var round: Int
+        /// Every step and note so far, streamed from the agent.
+        var progress = CodingProgressLog()
+        /// Plain-text copy of the progress, for the user (and her) to read back.
+        var logURL: URL?
+
+        var isRunning: Bool { finishedAt == nil }
+        var project: String { dir.lastPathComponent }
     }
 
     static let maxRuntime: TimeInterval = 45 * 60
 
+    static var logsFolder: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Miss Minute", isDirectory: true)
+    }
+
     /// Called when a job finishes, with a note for her to pick the task back up.
     var onFinished: ((Job) -> Void)?
-    private(set) var jobs: [Job] = []
+    /// Called each time a running job logs a new step or note.
+    var onProgress: ((Job) -> Void)?
+    @Published private(set) var jobs: [Job] = []
     private var tasks: [Int: Task<Void, Never>] = [:]
+    private var parsers: [Int: CodingProgressParser] = [:]
+    private var finalReports: [Int: String] = [:]
+    private var logHandles: [Int: FileHandle] = [:]
+
+    var runningJobs: [Job] { jobs.filter(\.isRunning) }
+
+    /// The newest job that has a log file, running or not.
+    var latestLogURL: URL? { jobs.last(where: { $0.logURL != nil })?.logURL }
 
     static var defaultProjectsFolder: URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -158,7 +180,7 @@ final class CodingAgentRunner {
         return url
     }
 
-    /// The first coding agent CLI found in the user's login shell.
+    /// The first coding agent CLI found in the user's login shell. Both stream JSON events so progress shows live.
     private func findAgent() async -> (name: String, command: String)? {
         let probe = await Shell.run("/bin/zsh", ["-lc", "command -v claude; command -v cursor-agent"], timeout: 10)
         let found = probe.output.split(separator: "\n").map(String.init)
@@ -167,18 +189,18 @@ final class CodingAgentRunner {
             ?? ["\(home)/.local/bin/claude", "\(home)/.claude/local/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
                 .first { FileManager.default.isExecutableFile(atPath: $0) }
         if let claude {
-            return ("Claude Code", "'\(claude)' -p --dangerously-skip-permissions --output-format text < \"$MM_PROMPT_FILE\"")
+            return ("Claude Code", "'\(claude)' -p --dangerously-skip-permissions --output-format stream-json --verbose < \"$MM_PROMPT_FILE\"")
         }
         let cursor = found.first { $0.hasSuffix("/cursor-agent") }
             ?? ["\(home)/.local/bin/cursor-agent"].first { FileManager.default.isExecutableFile(atPath: $0) }
         if let cursor {
-            return ("Cursor agent", "'\(cursor)' -p --force --output-format text \"$(cat \"$MM_PROMPT_FILE\")\"")
+            return ("Cursor agent", "'\(cursor)' -p --force --output-format stream-json \"$(cat \"$MM_PROMPT_FILE\")\"")
         }
         return nil
     }
 
     func start(in dir: URL, prompt: String) async throws -> Job {
-        if let running = jobs.first(where: { $0.dir == dir && $0.finishedAt == nil }) {
+        if let running = jobs.first(where: { $0.dir == dir && $0.isRunning }) {
             throw ToolError("Coding job #\(running.id) is still working in \(dir.lastPathComponent). Wait for its report or check coding_job_status.")
         }
         guard let agent = await findAgent() else {
@@ -189,24 +211,102 @@ final class CodingAgentRunner {
 
         let id = (jobs.last?.id ?? 0) + 1
         let round = jobs.filter { $0.dir == dir }.count + 1
-        let job = Job(id: id, dir: dir, agent: agent.name, startedAt: Date(), round: round)
+        var job = Job(id: id, dir: dir, agent: agent.name, startedAt: Date(), round: round)
+        job.progress.record("Starting \(agent.name) in \(dir.lastPathComponent)", kind: .step, at: job.startedAt)
+        job.logURL = openLog(for: job, prompt: prompt)
         jobs.append(job)
+        parsers[id] = CodingProgressParser()
+
+        // Lines arrive on the pipe's reader thread; a stream keeps them in order on the way to the main actor.
+        let (lines, sink) = AsyncStream.makeStream(of: String.self)
+        let reader = Task { [weak self] in
+            for await line in lines { self?.handle(line, job: id) }
+        }
         let command = "export MM_PROMPT_FILE='\(promptFile.path)'; \(agent.command)"
         tasks[id] = Task { [weak self] in
-            let result = await Shell.run("/bin/zsh", ["-lc", command], timeout: Self.maxRuntime, cwd: dir)
+            let result = await Shell.run("/bin/zsh", ["-lc", command], timeout: Self.maxRuntime, cwd: dir) { sink.yield($0) }
+            sink.finish()
+            await reader.value
             try? FileManager.default.removeItem(at: promptFile)
             guard let self, let index = self.jobs.firstIndex(where: { $0.id == id }) else { return }
             self.tasks[id] = nil
+            self.parsers[id] = nil
+            // Stopped by the user: cancelAll already closed it out.
+            guard self.jobs[index].isRunning else { return }
             self.jobs[index].finishedAt = Date()
             self.jobs[index].status = result.status
-            self.jobs[index].output = [result.output, result.error]
+            let report = self.finalReports.removeValue(forKey: id) ?? Self.fallbackReport(stdout: result.output, log: self.jobs[index].progress)
+            self.jobs[index].output = [report, result.error]
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
                 .joined(separator: "\n--- stderr ---\n")
+            self.closeLog(id, footer: "Finished with exit code \(result.status).")
             guard !Task.isCancelled else { return }
             self.onFinished?(self.jobs[index])
         }
         return job
+    }
+
+    private func handle(_ line: String, job id: Int) {
+        guard let index = jobs.firstIndex(where: { $0.id == id }), jobs[index].isRunning, var parser = parsers[id] else { return }
+        let events = parser.parse(line)
+        parsers[id] = parser
+        var changed = false
+        for event in events {
+            let added: Bool
+            switch event {
+            case .step(let text): added = jobs[index].progress.record(text, kind: .step)
+            case .note(let text): added = jobs[index].progress.record(text, kind: .note)
+            case .problem(let text): added = jobs[index].progress.record(text, kind: .problem)
+            case .finished(let result, let isError):
+                finalReports[id] = result
+                added = jobs[index].progress.record(isError ? "Wrapped up with a problem" : "Wrapping up", kind: .step)
+            }
+            if added, let entry = jobs[index].progress.entries.last {
+                appendToLog(id, CodingProgressLog.line(for: entry, since: jobs[index].startedAt))
+                changed = true
+            }
+        }
+        if changed { onProgress?(jobs[index]) }
+    }
+
+    /// No final report in the stream (an old CLI, or it crashed): use any plain stdout, else its last few notes.
+    private static func fallbackReport(stdout: String, log: CodingProgressLog) -> String {
+        let plain = stdout.split(separator: "\n").filter { !$0.hasPrefix("{") }.joined(separator: "\n")
+        if !plain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return plain }
+        return log.entries.filter { $0.kind == .note }.suffix(5).map(\.text).joined(separator: "\n")
+    }
+
+    // MARK: Log file
+
+    private func openLog(for job: Job, prompt: String) -> URL? {
+        let folder = Self.logsFolder
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyy-MM-dd-HHmmss"
+        let safeName = job.project.replacingOccurrences(of: "[^A-Za-z0-9._-]", with: "-", options: .regularExpression)
+        let url = folder.appendingPathComponent("coding-\(stamp.string(from: job.startedAt))-\(safeName).log")
+        let header = """
+        Coding job #\(job.id) · \(job.agent) · \(job.dir.path)
+        Started \(job.startedAt.formatted(date: .abbreviated, time: .standard))
+        Task: \(CodingProgressParser.firstLine(prompt) ?? "")
+
+        """
+        guard FileManager.default.createFile(atPath: url.path, contents: Data(header.utf8)),
+              let handle = try? FileHandle(forWritingTo: url) else { return nil }
+        handle.seekToEndOfFile()
+        logHandles[job.id] = handle
+        job.progress.entries.forEach { appendToLog(job.id, CodingProgressLog.line(for: $0, since: job.startedAt)) }
+        return url
+    }
+
+    private func appendToLog(_ id: Int, _ line: String) {
+        logHandles[id]?.write(Data((line + "\n").utf8))
+    }
+
+    private func closeLog(_ id: Int, footer: String) {
+        appendToLog(id, "\n" + footer)
+        try? logHandles.removeValue(forKey: id)?.close()
     }
 
     func showInEditor(_ dir: URL) {
@@ -219,21 +319,34 @@ final class CodingAgentRunner {
     func cancelAll() {
         tasks.values.forEach { $0.cancel() }
         tasks.removeAll()
-        for index in jobs.indices where jobs[index].finishedAt == nil {
+        for index in jobs.indices where jobs[index].isRunning {
             jobs[index].finishedAt = Date()
             jobs[index].output = "Stopped by the user."
+            jobs[index].progress.record("Stopped by the user", kind: .problem)
+            closeLog(jobs[index].id, footer: "Stopped by the user.")
         }
+        parsers.removeAll()
+        finalReports.removeAll()
     }
 
     func status(of id: Int?) -> String {
         guard !jobs.isEmpty else { return "No coding jobs yet." }
         var lines = jobs.suffix(6).map { job -> String in
             let minutes = Int((job.finishedAt ?? Date()).timeIntervalSince(job.startedAt) / 60)
-            let state = job.finishedAt == nil ? "running \(minutes) min" : "finished (exit \(job.status ?? -1)) after \(minutes) min"
+            let state = job.isRunning
+                ? "running \(minutes) min, now: \(job.progress.currentStep ?? "starting")"
+                : "finished (exit \(job.status ?? -1)) after \(minutes) min"
             return "#\(job.id) \(job.agent) in \(job.dir.path): \(state)"
         }
-        if let job = id.flatMap({ id in jobs.first { $0.id == id } }) ?? jobs.last, job.finishedAt != nil {
-            lines.append("\nOutput of #\(job.id):\n" + String(job.output.suffix(6_000)))
+        if let job = id.flatMap({ id in jobs.first { $0.id == id } }) ?? jobs.last {
+            if job.isRunning {
+                lines.append("\nLatest steps of #\(job.id):\n" + job.progress.recent(12)
+                    .map { CodingProgressLog.line(for: $0, since: job.startedAt) }
+                    .joined(separator: "\n"))
+            } else {
+                lines.append("\nOutput of #\(job.id):\n" + String(job.output.suffix(6_000)))
+            }
+            if let log = job.logURL { lines.append("Full log: \(log.path)") }
         }
         return lines.joined(separator: "\n")
     }

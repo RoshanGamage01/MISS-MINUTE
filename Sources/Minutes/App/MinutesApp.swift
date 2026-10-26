@@ -102,6 +102,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onTalk: { AppModel.shared.toggleListening() },
             onBrief: { AppModel.shared.briefMeNow() },
             onOpenSettings: { [weak self] in self?.openSettings() },
+            currentLook: { AppModel.shared.settingsStore.settings.avatarLook },
+            onChooseLook: { look in Task { await AppModel.shared.updateSettings { $0.avatarLook = look } } },
             onQuit: { NSApp.terminate(nil) }
         )
 
@@ -143,6 +145,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.onBubble = { [weak self] text in
             self?.bubbleController?.show(text)
         }
+        // Background coding jobs, live in the menu bar (at most once a second so it never flickers).
+        // Open goals are listed under them.
+        model.coding.$jobs
+            .combineLatest(model.goalStore.$goals)
+            .throttle(for: .seconds(1), scheduler: RunLoop.main, latest: true)
+            .sink { [weak self] jobs, goals in
+                let lines = jobs.filter(\.isRunning).map { job in
+                    "#\(job.id) \(job.project): \(job.progress.currentStep ?? "Starting…")"
+                }
+                let goalLines = goals.filter(\.isOpen).prefix(3).map { goal in
+                    "◎ \(goal.objective) (\(goal.settledCount)/\(goal.steps.count))"
+                }
+                let log = jobs.last(where: { $0.logURL != nil })?.logURL
+                self?.statusItemController?.showBackgroundWork(lines, logURL: log, goals: Array(goalLines))
+            }
+            .store(in: &cancellables)
         model.$liveTranscript
             .removeDuplicates()
             .sink { [weak self] text in self?.bubbleController?.showListening(text) }

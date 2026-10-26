@@ -255,6 +255,17 @@ final class CalendarService {
             }
     }
 
+    /// Timed events in the next few hours, for the autonomy loop. Empty without access.
+    func upcomingEvents(within interval: TimeInterval = 3 * 3_600) -> [UpcomingEvent] {
+        guard isEnabled(), hasAccess else { return [] }
+        let now = Date()
+        let predicate = store.predicateForEvents(withStart: now, end: now.addingTimeInterval(interval), calendars: nil)
+        return store.events(matching: predicate)
+            .filter { !$0.isAllDay && $0.startDate > now }
+            .sorted { $0.startDate < $1.startDate }
+            .map { UpcomingEvent(title: $0.title ?? "Untitled", start: $0.startDate, location: $0.location) }
+    }
+
     /// Events in the next day, for the context block. Empty without access.
     func upcomingLines() -> [String] {
         guard isEnabled(), hasAccess else { return [] }
@@ -378,8 +389,10 @@ enum Shell {
     }
 
     /// Runs a process off the main thread. Output is drained while it runs, so chatty commands can't stall on a
-    /// full pipe. Cancelling the calling task stops the process.
-    static func run(_ path: String, _ arguments: [String], timeout: TimeInterval = 20, cwd: URL? = nil) async -> Result {
+    /// full pipe. Cancelling the calling task stops the process. `onOutputLine` gets each finished stdout line as it
+    /// arrives (on a background thread).
+    static func run(_ path: String, _ arguments: [String], timeout: TimeInterval = 20, cwd: URL? = nil,
+                    onOutputLine: (@Sendable (String) -> Void)? = nil) async -> Result {
         let process = Process()
         return await withTaskCancellationHandler {
             await Task.detached(priority: .userInitiated) {
@@ -391,7 +404,12 @@ enum Shell {
                 process.standardOutput = out
                 process.standardError = err
                 let output = OutputBuffer(), error = OutputBuffer()
-                out.fileHandleForReading.readabilityHandler = { output.append($0.availableData) }
+                let lines = onOutputLine.map { LineStream($0) }
+                out.fileHandleForReading.readabilityHandler = {
+                    let chunk = $0.availableData
+                    output.append(chunk)
+                    lines?.feed(chunk)
+                }
                 err.fileHandleForReading.readabilityHandler = { error.append($0.availableData) }
                 do {
                     try process.run()
@@ -409,12 +427,37 @@ enum Shell {
                 }
                 out.fileHandleForReading.readabilityHandler = nil
                 err.fileHandleForReading.readabilityHandler = nil
-                output.append(out.fileHandleForReading.readDataToEndOfFile())
+                let rest = out.fileHandleForReading.readDataToEndOfFile()
+                output.append(rest)
+                lines?.feed(rest)
+                lines?.finish()
                 error.append(err.fileHandleForReading.readDataToEndOfFile())
                 return Result(status: timedOut ? -1 : process.terminationStatus, output: output.text, error: error.text)
             }.value
         } onCancel: {
             if process.isRunning { process.terminate() }
+        }
+    }
+
+    /// Hands whole stdout lines to a callback as the reader thread receives them.
+    private final class LineStream: @unchecked Sendable {
+        private let lock = NSLock()
+        private var splitter = LineSplitter()
+        private let deliver: @Sendable (String) -> Void
+
+        init(_ deliver: @escaping @Sendable (String) -> Void) { self.deliver = deliver }
+
+        func feed(_ chunk: Data) {
+            guard !chunk.isEmpty else { return }
+            lock.lock()
+            defer { lock.unlock() }
+            splitter.feed(chunk).forEach(deliver)
+        }
+
+        func finish() {
+            lock.lock()
+            defer { lock.unlock() }
+            splitter.finish().map(deliver)
         }
     }
 

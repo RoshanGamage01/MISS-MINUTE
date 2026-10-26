@@ -12,6 +12,9 @@ final class AppModel: ObservableObject {
     let reminderStore = ReminderStore()
     let taskStore = TaskStore()
     let memoryStore = MemoryStore()
+    let goalStore = GoalStore()
+    /// Her inner monologue: what she noticed, weighed, and did on her own.
+    let thoughts = ThoughtLog()
     private(set) lazy var memoryCurator = MemoryCurator(store: memoryStore)
     let usage = UsageTracker()
     let calendar = CalendarService()
@@ -32,6 +35,12 @@ final class AppModel: ObservableObject {
         reminders: reminderStore,
         usage: usage,
         calendar: calendar
+    )
+    private(set) lazy var autonomy = AutonomyLoop(
+        settings: { [weak self] in self?.settingsStore.settings ?? .default },
+        goals: goalStore,
+        tasks: taskStore,
+        thoughts: thoughts
     )
 
     @Published var chatPanelOpen = false
@@ -81,11 +90,14 @@ final class AppModel: ObservableObject {
     private var nudgeTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
     private var remarkTask: Task<Void, Never>?
+    /// Keeps background-job bubbles to one every minute or so, per job.
+    private var progressPacers: [Int: ProgressPacer] = [:]
 
     private init() {
         for publisher in [
             settingsStore.objectWillChange, reminderStore.objectWillChange, taskStore.objectWillChange,
-            memoryStore.objectWillChange, speech.objectWillChange, voiceInput.objectWillChange
+            memoryStore.objectWillChange, speech.objectWillChange, voiceInput.objectWillChange,
+            goalStore.objectWillChange, thoughts.objectWillChange
         ] {
             publisher
                 .sink { [weak self] _ in self?.objectWillChange.send() }
@@ -104,8 +116,11 @@ final class AppModel: ObservableObject {
         await taskStore.load()
         await memoryStore.load()
         await usage.load()
+        await goalStore.load()
+        await thoughts.load()
         await chatService.load()
         await taskStore.pruneCompleted()
+        await goalStore.pruneFinished()
 
         chatService.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
@@ -115,6 +130,12 @@ final class AppModel: ObservableObject {
         tools.register(CoreTools.all(tasks: taskStore, reminders: reminderStore, memory: memoryStore))
         tools.register(SystemTools.all(usage: usage, calendar: calendar))
         tools.register(WebTools.all())
+        tools.register(GoalTools.all(store: goalStore, initiative: { [weak self] in self?.chatService.initiative ?? .user }))
+        // Changing outfits when asked; the behavior engine sees the new setting and twirls into it.
+        tools.register(AppearanceTools.all(
+            current: { [weak self] in self?.settingsStore.settings.avatarLook ?? .signature },
+            apply: { [weak self] look in await self?.updateSettings { $0.avatarLook = look } }
+        ))
 
         // Seeing and operating the Mac.
         computer.settings = { [weak self] in self?.settingsStore.settings ?? .default }
@@ -125,7 +146,14 @@ final class AppModel: ObservableObject {
         tools.register(WorkTools.all(settings: { [weak self] in self?.settingsStore.settings ?? .default }, coding: coding))
         // A finished build comes back to her for QA, without waiting on the user.
         coding.onFinished = { [weak self] job in
+            self?.progressPacers[job.id] = nil
+            self?.behavior.react(to: .backgroundJobFinished(success: job.status == 0))
             self?.chatService.continueWork(CodingAgentRunner.followUpNote(for: job))
+        }
+        // The chat panel and menu bar show every step live; the bubble only gets the occasional update.
+        coding.onProgress = { [weak self] job in
+            self?.narrateProgress(of: job)
+            self?.thinkAboutBackgroundWork()
         }
         chatService.onTurnEnded = { [weak self] in self?.computer.endTask() }
         chatService.onWillSend = { [weak self] in self?.speech.prewarm() }
@@ -135,8 +163,12 @@ final class AppModel: ObservableObject {
         }
         chatService.onExchangeCompleted = { [weak self] userText, reply, toolsUsed in
             if toolsUsed.contains("complete_task") { self?.mood.observe(.taskCompleted) }
+            self?.behavior.react(to: .turnCompleted(reply: reply, toolsUsed: toolsUsed))
             self?.updateMemories(userText: userText, reply: reply, toolsUsed: toolsUsed)
         }
+
+        wireBody()
+        wireAutonomy()
 
         screenWatcher.settings = { [weak self] in self?.settingsStore.settings ?? .default }
         screenWatcher.makeProvider = { [weak self] in
@@ -242,6 +274,95 @@ final class AppModel: ObservableObject {
         restartNudgeTimer()
         await refreshModels()
         warmUpModel()
+    }
+
+    // MARK: - Working on her own
+
+    /// Connects the autonomy loop to the agent: her own work is gated by the policy on every tool call, and
+    /// each thing she notices, weighs, and does lands in the thought log.
+    private func wireAutonomy() {
+        chatService.toolPolicy = { [weak self] call, initiative in
+            guard let self else { return nil }
+            let decision = AutonomyPolicy.decide(call, initiative: initiative, level: self.settingsStore.settings.autonomyLevel,
+                                                 userIdleSeconds: SystemIdle.idleSeconds())
+            guard case .deny(let reason) = decision else { return nil }
+            self.thoughts.add(.heldBack, "Held back from \(call.name) (\(AutonomyPolicy.risk(of: call).label)): \(reason)")
+            return reason
+        }
+        chatService.onSelfDirectedTurnEnded = { [weak self] reply, toolsUsed, error in
+            self?.autonomy.workEnded(reply: reply, toolsUsed: toolsUsed, error: error)
+        }
+        // Her own goals and the user's both show progress in the Mind tab.
+        goalStore.onChange = { [weak self] _, line in self?.thoughts.add(.progress, line) }
+
+        autonomy.startWork = { [weak self] note, initiative in
+            self?.chatService.continueWork(note, initiative: initiative)
+        }
+        autonomy.offer = { [weak self] prompt, fallback in
+            self?.speakUp(prompt: prompt, fallback: fallback)
+        }
+        autonomy.isBusy = { [weak self] in
+            guard let self else { return true }
+            return self.chatService.isStreaming || self.voiceInput.isListening || self.speech.isSpeaking
+                || self.coding.jobs.contains(where: \.isRunning)
+        }
+        autonomy.inMeeting = { [weak self] in self?.proactive.inMeeting ?? false }
+        autonomy.frontApp = { [weak self] in self?.usage.frontmostApp }
+        autonomy.upcomingEvents = { [weak self] in self?.calendar.upcomingEvents() ?? [] }
+        autonomy.appsUsedToday = { [weak self] in Set(self?.usage.today(top: 100).map(\.app) ?? []) }
+        autonomy.start()
+    }
+
+    /// Hands her a bigger objective from the Mind tab: she plans it as a goal and works it through.
+    func pursueGoal(_ objective: String) {
+        let trimmed = objective.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        thoughts.add(.decided, "They gave me a goal: \(trimmed)")
+        chatService.send("Take this on as a goal and see it through: \(trimmed)")
+    }
+
+    // MARK: - Body language
+
+    /// The last kind of tool she ran this turn (coding work gets the focused look instead of the plain glow).
+    private var lastToolKind: BodyDirector.ToolKind?
+    private var lastBackgroundThink = Date.distantPast
+
+    /// Lets the agent drive her body: she goes where the work is, gestures with each step, and glows
+    /// or focuses while she works.
+    private func wireBody() {
+        chatService.onToolCall = { [weak self] call in
+            self?.lastToolKind = BodyDirector.kind(of: call.name)
+            self?.behavior.react(to: .toolStarted(name: call.name))
+        }
+        chatService.onToolFinished = { [weak self] call, outcome in
+            guard let self else { return }
+            self.behavior.react(to: .toolFinished(name: call.name, isError: outcome.isError))
+            // What she does on her own is logged step by step (the user's own requests show in the chat).
+            if self.chatService.initiative == .selfDirected, !outcome.output.hasPrefix("NOT ALLOWED") {
+                let what = outcome.summary ?? ChatService.statusLine(for: call).replacingOccurrences(of: "…", with: "")
+                self.thoughts.add(.acted, outcome.isError ? "\(what) didn't work: \(outcome.output.prefix(140))" : what)
+            }
+        }
+        chatService.onTurnFailed = { [weak self] in self?.behavior.react(to: .turnFailed) }
+        computer.onActionPoint = { [weak self] point in
+            self?.behavior.react(to: .actingAt(x: point.x, y: point.y))
+        }
+        let director = BodyDirector()
+        chatService.$mood
+            .combineLatest(coding.$jobs.map { $0.filter(\.isRunning).count }.removeDuplicates())
+            .sink { [weak self] mood, running in
+                guard let self else { return }
+                if mood == .idle { self.lastToolKind = nil }
+                self.behavior.body.steadyAura = director.steadyAura(mood: mood, backgroundJobsRunning: running, lastToolKind: self.lastToolKind)
+            }
+            .store(in: &cancellables)
+    }
+
+    /// Now and then while a background build runs, a little chin-tap to show she's minding it.
+    private func thinkAboutBackgroundWork() {
+        guard Date().timeIntervalSince(lastBackgroundThink) > 20, !chatService.isStreaming, !speech.isSpeaking else { return }
+        lastBackgroundThink = Date()
+        behavior.react(to: .backgroundJobProgress)
     }
 
     // MARK: - Secrets (voice keys)
@@ -390,6 +511,7 @@ final class AppModel: ObservableObject {
             openTasks: taskStore.openTasks,
             upcomingReminders: reminderStore.upcoming,
             calendarLines: calendar.upcomingLines(),
+            goals: goalStore.open,
             memories: memoryStore.contextLines(query: lastUserText),
             inputMode: inputMode,
             moodNote: currentTone(at: now).guidance
@@ -434,9 +556,20 @@ final class AppModel: ObservableObject {
     }
 
     /// Stops whatever she's doing right now: the agent turn, screen control, and speech.
+    /// A short "still on it" line in her bubble while a coding job runs, when nothing else has her attention.
+    private func narrateProgress(of job: CodingAgentRunner.Job) {
+        guard settingsStore.settings.narrateCodingProgress, job.isRunning, !chatPanelOpen,
+              !chatService.isStreaming, !voiceInput.isListening, !speech.isSpeaking else { return }
+        var pacer = progressPacers[job.id] ?? ProgressPacer()
+        defer { progressPacers[job.id] = pacer }
+        guard let step = pacer.next(job.progress.currentStep, startedAt: job.startedAt) else { return }
+        onBubble?("Still on \(job.project): \(step.prefix(1).lowercased() + step.dropFirst())…")
+    }
+
     func stopEverything() {
         chatService.cancelStreaming()
         coding.cancelAll()
+        progressPacers.removeAll()
         computer.endTask()
         speech.stop()
         if voiceInput.isListening { voiceInput.stop(deliver: false) }

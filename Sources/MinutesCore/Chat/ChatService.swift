@@ -25,13 +25,17 @@ public final class ChatService: ObservableObject {
 
     /// Computer-use and build tasks take many observe/act steps.
     public static let maxStepsPerTurn = 100
+    /// Work she starts herself gets a shorter leash.
+    public static let maxStepsPerSelfDirectedTurn = 30
+    /// Who started the turn that's running (or last ran).
+    @Published public private(set) var initiative: Initiative = .user
     /// Words in the first spoken chunk when no punctuation comes sooner.
     public static let firstChunkWords = 4
     /// Tools that finish in milliseconds; the real reply follows right away, so no "one sec" first.
     public static let instantTools: Set<String> = [
         "add_task", "update_task", "complete_task", "delete_task", "list_tasks",
         "set_reminder", "list_reminders", "cancel_reminder", "start_timer",
-        "remember", "recall", "forget"
+        "remember", "recall", "forget", "start_goal", "update_goal", "list_goals", "finish_goal"
     ]
     /// Spoken the moment a slower tool starts, if she hasn't said anything yet.
     public static let acknowledgements = ["Sure thing, one sec!", "On it, sugar!", "One moment, hon!", "Let me take a look!"]
@@ -46,7 +50,7 @@ public final class ChatService: ObservableObject {
     private let reminderParser: ReminderParser
     private var pendingAnnouncements: [ChatMessage] = []
     /// Background work that finished mid-turn; she picks it up once the current turn ends.
-    private var pendingContinuations: [String] = []
+    private var pendingContinuations: [(note: String, initiative: Initiative)] = []
 
     /// Offline fallback when no model is reachable and the text is a plain reminder request.
     public var onReminderParsed: ((ParsedReminder) -> Void)?
@@ -56,6 +60,10 @@ public final class ChatService: ObservableObject {
     public var onReply: ((String) -> Void)?
     /// About to run a tool (lets the app get out of the way of screen actions).
     public var onToolCall: ((ToolCall) -> Void)?
+    /// A tool finished (her body reacts: thumbs up, shrug, a jump to the app that just opened).
+    public var onToolFinished: ((ToolCall, ToolOutcome) -> Void)?
+    /// The turn failed with an error.
+    public var onTurnFailed: (() -> Void)?
     /// A message is about to go to the model (warm up the voice while it thinks).
     public var onWillSend: (() -> Void)?
     /// The user's words, just before the context block is built (mood tracking, memory lookup).
@@ -64,6 +72,10 @@ public final class ChatService: ObservableObject {
     public var onTurnEnded: (() -> Void)?
     /// A turn completed normally: the user's words, her full reply, and the names of tools she used.
     public var onExchangeCompleted: ((_ userText: String, _ reply: String, _ toolsUsed: [String]) -> Void)?
+    /// Checked before every tool call; a non-nil reason blocks it (the reason goes back to the model).
+    public var toolPolicy: ((ToolCall, Initiative) -> String?)?
+    /// A self-directed turn ended: her reply (nil when she decided it wasn't worth it) and the tools she used.
+    public var onSelfDirectedTurnEnded: ((_ reply: String?, _ toolsUsed: [String], _ error: String?) -> Void)?
     public var providerFactory: () throws -> any ChatProvider
     public var settingsProvider: () -> AppSettings
     /// Builds the `<context>` note for a new user message. Argument: "typed" or "spoken".
@@ -111,7 +123,7 @@ public final class ChatService: ObservableObject {
             switch message.role {
             case .system: return false
             case .tool: return message.displaySummary != nil
-            case .assistant: return !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .assistant: return message.isHidden != true && !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             case .user: return message.isHidden != true
             }
         }
@@ -154,7 +166,7 @@ public final class ChatService: ObservableObject {
             note += "\n(You already said “\(ack)” out loud the moment they finished, so don't open with another acknowledgement.)"
         }
         append(ChatMessage(role: .user, content: trimmed, contextNote: note))
-        runTurn()
+        runTurn(initiative: .user)
     }
 
     /// Stops the current turn and drops any queued background follow-ups.
@@ -164,24 +176,32 @@ public final class ChatService: ObservableObject {
     }
 
     /// Picks a task back up without the user (a coding job finished, say). `note` goes to the model as a hidden
-    /// message; if she's busy, it waits until the current turn ends.
-    public func continueWork(_ note: String) {
+    /// message; if she's busy, it waits until the current turn ends. Pass `.selfDirected` for work she started
+    /// herself: it's held to the autonomy policy and stays quiet unless she has something to report.
+    public func continueWork(_ note: String, initiative: Initiative = .user) {
         if isStreaming {
-            pendingContinuations.append(note)
+            // Her own ideas never queue behind (or interrupt) a conversation; the loop will try again later.
+            if initiative == .user { pendingContinuations.append((note, initiative)) }
             return
         }
         lastError = nil
-        LatencyTrace.shared.begin(origin: "background")
-        append(ChatMessage(role: .user, content: note, contextNote: contextProvider("background"), isHidden: true))
-        runTurn()
+        LatencyTrace.shared.begin(origin: initiative == .selfDirected ? "initiative" : "background")
+        append(ChatMessage(role: .user, content: note,
+                           contextNote: contextProvider(initiative == .selfDirected ? "your own initiative (the user didn't ask)" : "background"),
+                           isHidden: true))
+        runTurn(initiative: initiative)
     }
 
     private func runPendingContinuation() {
         guard !isStreaming, !pendingContinuations.isEmpty else { return }
-        continueWork(pendingContinuations.removeFirst())
+        let next = pendingContinuations.removeFirst()
+        continueWork(next.note, initiative: next.initiative)
     }
 
     private func cancelTurn() {
+        if isStreaming, initiative == .selfDirected {
+            onSelfDirectedTurnEnded?(nil, [], "Paused so the user comes first.")
+        }
         LatencyTrace.shared.cancel()
         turnTask?.cancel()
         turnTask = nil
@@ -216,8 +236,10 @@ public final class ChatService: ObservableObject {
 
     // MARK: - Agent loop
 
-    private func runTurn() {
+    private func runTurn(initiative: Initiative) {
         turnTask?.cancel()
+        self.initiative = initiative
+        let selfDirected = initiative == .selfDirected
         isStreaming = true
         streamingText = ""
         activityStatus = nil
@@ -227,7 +249,8 @@ public final class ChatService: ObservableObject {
 
         turnTask = Task { [weak self] in
             guard let self else { return }
-            var spokeSomething = self.acknowledgedThisTurn
+            // Her own work stays quiet (no "one sec!") until there's a result worth saying.
+            var spokeSomething = self.acknowledgedThisTurn || selfDirected
             var nudged = false
             var pushedToChoose = false
             var checkedWork = false
@@ -236,6 +259,7 @@ public final class ChatService: ObservableObject {
             let userText = self.conversation.messages.last(where: { $0.role == .user && $0.isHidden != true })?.content ?? ""
             // Voice each sentence as soon as it's complete; the first one interrupts, the rest queue.
             let speak: (String) -> Void = { sentence in
+                guard !selfDirected else { return }
                 LatencyTrace.shared.mark(.firstChunk)
                 self.onSpeak?(sentence, spokeSomething)
                 spokeSomething = true
@@ -247,7 +271,7 @@ public final class ChatService: ObservableObject {
                 // prefix and invalidate thinking blocks being replayed inside the tool loop.
                 let windowStart = Transcript.window(self.conversation.messages, limit: 60).first?.id
 
-                for _ in 0..<Self.maxStepsPerTurn {
+                for _ in 0..<(selfDirected ? Self.maxStepsPerSelfDirectedTurn : Self.maxStepsPerTurn) {
                     let all = self.conversation.messages.filter { $0.role != .system }
                     let startIndex = windowStart.flatMap { id in all.firstIndex { $0.id == id } } ?? 0
                     let request = AgentRequest(
@@ -322,7 +346,9 @@ public final class ChatService: ObservableObject {
                         role: .assistant,
                         content: text,
                         toolCalls: calls.isEmpty ? nil : calls,
-                        providerContent: raw
+                        isProactive: selfDirected ? true : nil,
+                        providerContent: raw,
+                        isHidden: selfDirected && Self.isSkip(text) ? true : nil
                     ))
                     if !text.isEmpty {
                         replyParts.append(text)
@@ -339,7 +365,7 @@ public final class ChatService: ObservableObject {
                         continue
                     }
                     // Asked them to pick ("what should I play?") when they'd asked her to just do it.
-                    if calls.isEmpty, !pushedToChoose, !self.tools.specs.isEmpty,
+                    if calls.isEmpty, !pushedToChoose, !selfDirected, !self.tools.specs.isEmpty,
                        Autonomy.handedBack(reply: text, request: userText) {
                         pushedToChoose = true
                         self.append(ChatMessage(role: .user, content: Autonomy.chooseNudge, isHidden: true))
@@ -361,7 +387,13 @@ public final class ChatService: ObservableObject {
                         self.activityStatus = Self.statusLine(for: call)
                         self.onToolCall?(call)
                         toolsUsed.append(call.name)
-                        let outcome = await self.tools.execute(call)
+                        let outcome: ToolOutcome
+                        if let reason = self.toolPolicy?(call, initiative) {
+                            outcome = .failure("NOT ALLOWED: \(reason)")
+                        } else {
+                            outcome = await self.tools.execute(call)
+                        }
+                        self.onToolFinished?(call, outcome)
                         self.append(ChatMessage(
                             role: .tool,
                             content: outcome.output,
@@ -378,10 +410,17 @@ public final class ChatService: ObservableObject {
                 }
 
                 guard !Task.isCancelled else { return }
-                let reply = replyParts.joined(separator: " ")
+                var reply = replyParts.joined(separator: " ")
+                if selfDirected {
+                    // Decided it wasn't worth it: no bubble, no voice.
+                    let skipped = reply.isEmpty || Self.isSkip(reply) || replyParts.last.map(Self.isSkip) == true
+                    if skipped { reply = "" }
+                    self.onSelfDirectedTurnEnded?(skipped ? nil : reply, toolsUsed, nil)
+                    if !reply.isEmpty { self.onSpeak?(reply, false) }
+                }
                 if !reply.isEmpty { self.onReply?(reply) }
                 self.endTurn()
-                self.onExchangeCompleted?(userText, reply, toolsUsed)
+                if !selfDirected { self.onExchangeCompleted?(userText, reply, toolsUsed) }
                 self.mood = .talking
                 await self.persist()
                 self.runPendingContinuation()
@@ -393,9 +432,19 @@ public final class ChatService: ObservableObject {
                 if let providerError = error as? ChatProviderError, providerError == .cancelled { return }
                 self.streamingText = ""
                 self.repairInterruptedTurn()
+                if selfDirected {
+                    // Her own work failing isn't the user's problem; it goes to her log, not the chat.
+                    self.onSelfDirectedTurnEnded?(nil, toolsUsed, error.localizedDescription)
+                    self.endTurn()
+                    self.mood = .idle
+                    await self.persist()
+                    self.runPendingContinuation()
+                    return
+                }
                 self.lastError = error.localizedDescription
                 self.endTurn()
                 self.mood = .concerned
+                self.onTurnFailed?()
                 await self.persist()
                 self.runPendingContinuation()
                 guard !self.isStreaming else { return }
@@ -403,6 +452,11 @@ public final class ChatService: ObservableObject {
                 if self.mood == .concerned { self.mood = .idle }
             }
         }
+    }
+
+    /// She looked closer and decided her own idea wasn't worth doing.
+    nonisolated static func isSkip(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters)).uppercased() == InitiativeNotes.skipToken
     }
 
     private func nextAcknowledgement() -> String {
@@ -471,7 +525,7 @@ public final class ChatService: ObservableObject {
         }
     }
 
-    static func statusLine(for call: ToolCall) -> String {
+    public static func statusLine(for call: ToolCall) -> String {
         switch call.name {
         case "add_task", "update_task", "complete_task", "delete_task", "list_tasks": return "Updating your tasks…"
         case "set_reminder", "list_reminders", "cancel_reminder": return "Setting things on the timeline…"
@@ -485,6 +539,9 @@ public final class ChatService: ObservableObject {
         case "run_shell": return "Running a command…"
         case "start_coding_agent": return "Handing the build to the coding agent…"
         case "coding_job_status": return "Checking on the build…"
+        case "change_look": return "Changing my look…"
+        case "start_goal": return "Planning it out…"
+        case "update_goal", "list_goals", "finish_goal": return "Ticking off steps…"
         default: return "Working on it…"
         }
     }

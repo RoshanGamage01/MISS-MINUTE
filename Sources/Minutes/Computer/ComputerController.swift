@@ -11,6 +11,8 @@ final class ComputerController {
     var settings: () -> AppSettings = { .default }
     /// Hide/disable Miss Minute's own windows while she drives the screen (and restore afterwards).
     var onBeginActing: (() -> Void)?
+    /// About to click/scroll/drag at this spot (global Cocoa coordinates), so her body can point at it.
+    var onActionPoint: ((CGPoint) -> Void)?
     var onEndActing: (() -> Void)?
     /// The request she's working on, for the approval prompt.
     var currentRequest: () -> String? = { nil }
@@ -48,6 +50,12 @@ final class ComputerController {
     }
 
     /// One-line description of what's in front of the user (for context).
+    /// Converts a global Core Graphics point (top-left origin) for `onActionPoint`.
+    private func reportActionPoint(_ point: CGPoint) {
+        guard let mainHeight = NSScreen.screens.first?.frame.height else { return }
+        onActionPoint?(CGPoint(x: point.x, y: mainHeight - point.y))
+    }
+
     func frontSummary() -> (app: String?, title: String?) {
         guard let app = targetApp else { return (nil, nil) }
         return (app.localizedName, AccessibilityReader.frontWindowTitle(of: app))
@@ -157,6 +165,7 @@ final class ComputerController {
                 }
                 try await self.authorize("click on your screen")
                 let point = shot.screenPoint(x: x, y: y)
+                self.reportActionPoint(point)
                 InputController.click(at: point, right: args.optionalString("button") == "right", count: args["double"]?.boolValue == true ? 2 : 1)
                 try? await Task.sleep(nanoseconds: 350_000_000)
                 return .ok("Clicked at (\(Int(x)), \(Int(y))). Look again to confirm the result.", summary: "Clicked")
@@ -234,6 +243,7 @@ final class ComputerController {
                 if let shot = self.lastShot, let x = args["x"]?.doubleValue, let y = args["y"]?.doubleValue {
                     point = shot.screenPoint(x: x, y: y)
                 }
+                if let point { self.reportActionPoint(point) }
                 let dy = direction == "down" ? amount : (direction == "up" ? -amount : 0)
                 let dx = direction == "right" ? amount : (direction == "left" ? -amount : 0)
                 InputController.scroll(dy: dy, dx: dx, at: point)
@@ -251,6 +261,7 @@ final class ComputerController {
                 guard let fx = args["from_x"]?.doubleValue, let fy = args["from_y"]?.doubleValue,
                       let tx = args["to_x"]?.doubleValue, let ty = args["to_y"]?.doubleValue else { throw ToolError("Missing coordinates.") }
                 try await self.authorize("drag on your screen")
+                self.reportActionPoint(shot.screenPoint(x: tx, y: ty))
                 InputController.drag(from: shot.screenPoint(x: fx, y: fy), to: shot.screenPoint(x: tx, y: ty))
                 return .ok("Dragged.", summary: "Dragged")
             },

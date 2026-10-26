@@ -16,6 +16,37 @@ final class BodyState {
     var airborne = false
     var expression: Expression = .none
     var expressionUntil: TimeInterval = 0
+    /// Floating on her own (gliding somewhere, or hovering beside what she's working on).
+    var hovering = false
+
+    /// A deliberate gesture (pointing, thumbs up…) and when it started/ends.
+    private(set) var gesture: BodyGesture?
+    private(set) var gestureStart: TimeInterval = 0
+    private var gestureUntil: TimeInterval = 0
+    /// Direction from her face to what she's pointing or looking at (normalized, y down).
+    var pointVector = CGPoint(x: 1, y: 0)
+
+    /// The look she holds while working (processing glow, focused face), set from the agent's state…
+    var steadyAura: BodyAura = .none
+    /// …and short bursts on top of it (celebration, alert).
+    private var flashAura: BodyAura = .none
+    private var flashAuraUntil: TimeInterval = 0
+
+    /// The outfit she's wearing, and the cross-fade while she changes into another. Set by the user or the
+    /// agent, never by task state: auras are drawn on top of whatever look she has on.
+    private(set) var look = LookTransition(settledOn: .signature)
+
+    /// Starts changing into `look` (or puts it on instantly). Returns false if she's already wearing it.
+    @discardableResult
+    func changeLook(to look: AvatarLook, animated: Bool = true) -> Bool {
+        self.look.retarget(to: look, at: Date.timeIntervalSinceReferenceDate, animated: animated)
+    }
+
+    /// When the current teleport began (0 = not teleporting).
+    var teleportStart: TimeInterval = 0
+    static let teleportDuration: TimeInterval = 0.55
+    /// Fraction of the teleport at which her window jumps to the new spot.
+    static let teleportJumpAt: Double = 0.44
 
     func express(_ expression: Expression, for seconds: TimeInterval) {
         self.expression = expression
@@ -24,6 +55,33 @@ final class BodyState {
 
     func currentExpression(at t: TimeInterval) -> Expression {
         t < expressionUntil ? expression : .none
+    }
+
+    func perform(_ gesture: BodyGesture, for seconds: TimeInterval) {
+        let now = Date.timeIntervalSinceReferenceDate
+        self.gesture = gesture
+        gestureStart = now
+        gestureUntil = now + seconds
+    }
+
+    func currentGesture(at t: TimeInterval) -> BodyGesture? {
+        t < gestureUntil ? gesture : nil
+    }
+
+    func flash(_ aura: BodyAura, for seconds: TimeInterval) {
+        flashAura = aura
+        flashAuraUntil = Date.timeIntervalSinceReferenceDate + seconds
+    }
+
+    func currentAura(at t: TimeInterval) -> BodyAura {
+        t < flashAuraUntil ? flashAura : steadyAura
+    }
+
+    /// 0…1 through a teleport, or nil when she isn't teleporting.
+    func teleportProgress(at t: TimeInterval) -> Double? {
+        guard teleportStart > 0 else { return nil }
+        let p = (t - teleportStart) / Self.teleportDuration
+        return p >= 0 && p < 1 ? p : nil
     }
 }
 
@@ -53,6 +111,19 @@ final class BehaviorEngine {
         case jumping(from: NSPoint, to: NSPoint, start: Date, duration: TimeInterval, perchOn: CGWindowID?, offset: CGFloat)
         case perched(window: CGWindowID, offset: CGFloat)
         case falling(velocity: CGFloat)
+        /// Floating straight to a spot she chose on purpose.
+        case gliding(from: NSPoint, to: NSPoint, start: Date, duration: TimeInterval, arrival: Arrival)
+        /// Out through a time door, in at the destination.
+        case teleporting(to: NSPoint, start: Date, moved: Bool, arrival: Arrival)
+        /// Floating beside what she's working on; heads home once the work is done.
+        case hovering(until: Date)
+    }
+
+    /// What she does on arriving somewhere she chose to go.
+    private enum Arrival {
+        case rest
+        case hover
+        case perch(window: CGWindowID, offset: CGFloat)
     }
 
     private var plan: Plan = .resting(until: Date().addingTimeInterval(6))
@@ -71,12 +142,20 @@ final class BehaviorEngine {
     private var currentTone: MoodTone = .steady
     private var lastToneCheck = Date.distantPast
 
+    private var lastDragAt = Date.distantPast
+    /// What she's pointing/looking at (Cocoa screen coordinates), while a gesture lasts.
+    private var pointTarget: NSPoint?
+    private var pendingMove: Task<Void, Never>?
+    private let director = BodyDirector()
+
     private let walkSpeed: CGFloat = 95   // points per second
     private let gravity: CGFloat = 2_600
 
     func start() {
         timer?.invalidate()
         lastTick = Date()
+        // Wake up already wearing the saved look; only later changes animate.
+        body.changeLook(to: settings().avatarLook, animated: false)
         let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
@@ -92,14 +171,18 @@ final class BehaviorEngine {
         plan = .resting(until: Date().addingTimeInterval(4))
         body.perched = false
         body.airborne = false
+        body.hovering = false
     }
 
     // MARK: - User interaction
 
     func dragBegan() {
         isDragging = true
+        pendingMove?.cancel()
         body.walking = false
         body.perched = false
+        body.hovering = false
+        body.teleportStart = 0
         body.airborne = true
         wake(silently: true)
         body.express(.surprised, for: 1.2)
@@ -109,6 +192,7 @@ final class BehaviorEngine {
 
     func dragEnded() {
         isDragging = false
+        lastDragAt = Date()
         body.airborne = false
         guard let frame = frame() else { return }
         // Wherever you put her becomes her new floor.
@@ -144,6 +228,8 @@ final class BehaviorEngine {
 
         refreshIdle(now)
         refreshTone(now)
+        refreshLook()
+        refreshPointing(frame: frame)
         handlePetting(now)
         handleSleep(now, frame: frame)
 
@@ -209,6 +295,38 @@ final class BehaviorEngine {
                 body.express(.surprised, for: 1.0)
             }
 
+        case .gliding(let from, let to, let start, let duration, let arrival):
+            let p = min(1, now.timeIntervalSince(start) / duration)
+            // Ease in and out, with a slight lift mid-flight so it reads as floating, not sliding.
+            let e = CGFloat(p * p * (3 - 2 * p))
+            let lift = CGFloat(sin(p * .pi)) * min(40, hypot(to.x - from.x, to.y - from.y) * 0.08)
+            setOrigin(NSPoint(x: from.x + (to.x - from.x) * e, y: from.y + (to.y - from.y) * e + lift))
+            body.hovering = true
+            body.facing = abs(to.x - from.x) < 4 ? 0 : (to.x > from.x ? 1 : -1)
+            if p >= 1 { arrive(arrival, at: now) }
+
+        case .teleporting(let to, let start, let moved, let arrival):
+            let p = now.timeIntervalSince(start) / BodyState.teleportDuration
+            if !moved, p >= BodyState.teleportJumpAt {
+                setOrigin(to)
+                plan = .teleporting(to: to, start: start, moved: true, arrival: arrival)
+            }
+            if p >= 1 {
+                body.teleportStart = 0
+                arrive(arrival, at: now)
+            }
+
+        case .hovering(let until):
+            body.hovering = true
+            body.walking = false
+            if now >= until {
+                if engaged {
+                    plan = .hovering(until: now.addingTimeInterval(3))
+                } else {
+                    go(to: .home, travel: .glide)
+                }
+            }
+
         case .falling(let velocity):
             let floor = floorY ?? frame.minY
             let v = velocity + gravity * dt
@@ -224,6 +342,165 @@ final class BehaviorEngine {
                 plan = .falling(velocity: v)
             }
         }
+    }
+
+    // MARK: - Looks
+
+    /// Picks up a new look however it was chosen (her `change_look` tool, Settings, the menu bar) and
+    /// changes into it with a twirl while the colors cross-fade. Runs alongside whatever she's working on.
+    private func refreshLook() {
+        let wanted = settings().avatarLook
+        guard body.changeLook(to: wanted) else { return }
+        react(to: .lookChanged(to: wanted))
+    }
+
+    // MARK: - Purposeful behavior
+
+    /// Acts on a cue from the agent: a gesture, a look, and maybe a trip somewhere on screen.
+    func perform(_ cue: BodyCue) {
+        if let gesture = cue.gesture {
+            wake(silently: true)
+            body.perform(gesture, for: cue.gestureSeconds)
+            if gesture == .point || gesture == .peer {
+                pointTarget = cue.destination.flatMap(point(of:))
+            } else {
+                pointTarget = nil
+            }
+        }
+        if let aura = cue.aura, aura != .none {
+            body.flash(aura, for: cue.auraSeconds)
+        }
+        guard let destination = cue.destination else { return }
+        pendingMove?.cancel()
+        let travel = cue.travel
+        guard cue.delay > 0 else {
+            go(to: destination, travel: travel)
+            return
+        }
+        pendingMove = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(cue.delay * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            // The app that just opened is in front now: aim at it, then go.
+            if self.body.currentGesture(at: Date.timeIntervalSinceReferenceDate) == .point {
+                self.pointTarget = self.point(of: destination)
+            }
+            self.go(to: destination, travel: travel)
+        }
+    }
+
+    /// Carries out an agent event (see `BodyDirector` for the mapping).
+    func react(to event: AgentBodyEvent) {
+        if let cue = director.cue(for: event) { perform(cue) }
+    }
+
+    /// Whether she may move on her own right now: not while held, not right after the user placed her,
+    /// and not when she's been told to stay put.
+    private var mayTravel: Bool {
+        !isDragging && settings().liveliness != .still && Date().timeIntervalSince(lastDragAt) > 90
+    }
+
+    private func go(to destination: BodyDestination, travel: BodyTravel) {
+        guard mayTravel, let frame = frame() else { return }
+        // Calm mode never pops in and out; she floats over instead.
+        let travel: BodyTravel = settings().liveliness == .lively ? travel : .glide
+        switch destination {
+        case .activeWindow:
+            guard let window = WindowFinder.frontWindow() else { return }
+            if case .perched(let id, _) = plan, id == window.id { return }
+            // Sit on the end of the window nearest to where she is now.
+            let offset = min(max(frame.midX - window.frame.minX, window.frame.width * 0.12), window.frame.width * 0.88)
+            if let origin = perchOrigin(on: window.frame, offset: offset) {
+                move(to: origin, from: frame, by: travel, arrival: .perch(window: window.id, offset: offset))
+            } else if let origin = beside(NSPoint(x: window.frame.midX, y: window.frame.midY), size: frame.size) {
+                // Too tall to sit on: float alongside it instead.
+                move(to: origin, from: frame, by: travel, arrival: .hover)
+            }
+        case .cursor:
+            if let origin = beside(NSEvent.mouseLocation, size: frame.size) {
+                move(to: origin, from: frame, by: travel, arrival: .hover)
+            }
+        case .screenPoint(let x, let y):
+            if let origin = beside(NSPoint(x: x, y: y), size: frame.size) {
+                move(to: origin, from: frame, by: travel, arrival: .hover)
+            }
+        case .home:
+            let origin = NSPoint(x: homeX ?? frame.minX, y: floorY ?? frame.minY)
+            move(to: origin, from: frame, by: travel, arrival: .rest)
+        }
+    }
+
+    private func move(to origin: NSPoint, from frame: NSRect, by travel: BodyTravel, arrival: Arrival) {
+        body.walking = false
+        body.perched = false
+        body.airborne = false
+        let distance = hypot(origin.x - frame.minX, origin.y - frame.minY)
+        if distance < 12 {
+            setOrigin(origin)
+            arrive(arrival, at: Date())
+            return
+        }
+        if travel == .teleport {
+            body.teleportStart = Date.timeIntervalSinceReferenceDate
+            plan = .teleporting(to: origin, start: Date(), moved: false, arrival: arrival)
+        } else {
+            let duration = min(1.3, max(0.4, Double(distance) / 900))
+            plan = .gliding(from: frame.origin, to: origin, start: Date(), duration: duration, arrival: arrival)
+        }
+    }
+
+    private func arrive(_ arrival: Arrival, at now: Date) {
+        body.facing = 0
+        switch arrival {
+        case .rest:
+            body.hovering = false
+            plan = .resting(until: now.addingTimeInterval(randomPause()))
+        case .hover:
+            body.hovering = true
+            plan = .hovering(until: now.addingTimeInterval(6))
+        case .perch(let window, let offset):
+            body.hovering = false
+            body.perched = true
+            plan = .perched(window: window, offset: offset)
+        }
+    }
+
+    /// Where her window goes to float just beside a point (on whichever side has room), so her hand can
+    /// point at it without covering it.
+    private func beside(_ point: NSPoint, size: NSSize) -> NSPoint? {
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) ?? NSScreen.main else { return nil }
+        let visible = screen.visibleFrame
+        let gap: CGFloat = 12
+        var x = point.x < visible.midX ? point.x + gap : point.x - size.width - gap
+        var y = point.y - size.height * 0.6
+        x = min(max(x, visible.minX), visible.maxX - size.width)
+        y = min(max(y, visible.minY), visible.maxY - size.height)
+        return NSPoint(x: x, y: y)
+    }
+
+    private func point(of destination: BodyDestination) -> NSPoint? {
+        switch destination {
+        case .activeWindow:
+            return WindowFinder.frontWindow().map { NSPoint(x: $0.frame.midX, y: $0.frame.midY) }
+        case .cursor:
+            return NSEvent.mouseLocation
+        case .screenPoint(let x, let y):
+            return NSPoint(x: x, y: y)
+        case .home:
+            return nil
+        }
+    }
+
+    /// Keeps her pointing arm and eyes aimed at the target as she (or it) moves.
+    private func refreshPointing(frame: NSRect) {
+        let face = NSPoint(x: frame.midX, y: frame.minY + frame.height * 0.59)
+        if body.currentGesture(at: Date.timeIntervalSinceReferenceDate) == nil { pointTarget = nil }
+        guard let target = pointTarget else {
+            body.pointVector = CGPoint(x: body.facing == 0 ? 1 : body.facing, y: 0)
+            return
+        }
+        let dx = target.x - face.x, dy = face.y - target.y
+        let length = max(1, hypot(dx, dy))
+        body.pointVector = CGPoint(x: dx / length, y: dy / length)
     }
 
     private func decide(frame: NSRect) {

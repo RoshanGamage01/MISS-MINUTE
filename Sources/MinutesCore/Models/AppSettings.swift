@@ -211,6 +211,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var characterCorner: CharacterCorner
     public var characterSize: Double
     public var characterSkin: CharacterSkin
+    /// The outfit she's wearing (Night, Sunny, TVA Formal…); she can change it herself when asked.
+    public var avatarLook: AvatarLook
     public var launchAtLogin: Bool
     public var periodicNudgeEnabled: Bool
     public var periodicNudgeMinutes: Int
@@ -259,6 +261,12 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var sayVoice: String
     /// Always-on, on-device listening for "Hey Minute".
     public var wakeWordEnabled: Bool
+    /// Pop short "what I'm doing" lines in her bubble while a coding job runs in the background.
+    public var narrateCodingProgress: Bool
+    /// How much she does on her own, without being asked.
+    public var autonomyLevel: AutonomyLevel
+    /// Most things she'll do on her own in a day (offers don't count).
+    public var autonomyDailyActions: Int
 
     public init(
         provider: ProviderKind = .ollama,
@@ -270,6 +278,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         characterCorner: CharacterCorner = .bottomTrailing,
         characterSize: Double = 150,
         characterSkin: CharacterSkin = .hologram,
+        avatarLook: AvatarLook = .signature,
         launchAtLogin: Bool = false,
         periodicNudgeEnabled: Bool = false,
         periodicNudgeMinutes: Int = 60,
@@ -311,7 +320,10 @@ public struct AppSettings: Codable, Sendable, Equatable {
         autoMemory: Bool = true,
         voiceExpressiveness: Double = 0.6,
         sayVoice: String = "",
-        wakeWordEnabled: Bool = true
+        wakeWordEnabled: Bool = true,
+        narrateCodingProgress: Bool = true,
+        autonomyLevel: AutonomyLevel = .safe,
+        autonomyDailyActions: Int = 12
     ) {
         self.provider = provider
         self.model = model
@@ -322,6 +334,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         self.characterCorner = characterCorner
         self.characterSize = characterSize
         self.characterSkin = characterSkin
+        self.avatarLook = avatarLook
         self.launchAtLogin = launchAtLogin
         self.periodicNudgeEnabled = periodicNudgeEnabled
         self.periodicNudgeMinutes = periodicNudgeMinutes
@@ -364,6 +377,9 @@ public struct AppSettings: Codable, Sendable, Equatable {
         self.voiceExpressiveness = voiceExpressiveness
         self.sayVoice = sayVoice
         self.wakeWordEnabled = wakeWordEnabled
+        self.narrateCodingProgress = narrateCodingProgress
+        self.autonomyLevel = autonomyLevel
+        self.autonomyDailyActions = autonomyDailyActions
     }
 
     public static let currentVersion = 5
@@ -381,6 +397,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         characterCorner = try c.decodeIfPresent(CharacterCorner.self, forKey: .characterCorner) ?? d.characterCorner
         characterSize = try c.decodeIfPresent(Double.self, forKey: .characterSize) ?? d.characterSize
         characterSkin = try c.decodeIfPresent(CharacterSkin.self, forKey: .characterSkin) ?? d.characterSkin
+        avatarLook = (try? c.decodeIfPresent(AvatarLook.self, forKey: .avatarLook)) ?? d.avatarLook
         launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? d.launchAtLogin
         periodicNudgeEnabled = try c.decodeIfPresent(Bool.self, forKey: .periodicNudgeEnabled) ?? d.periodicNudgeEnabled
         periodicNudgeMinutes = try c.decodeIfPresent(Int.self, forKey: .periodicNudgeMinutes) ?? d.periodicNudgeMinutes
@@ -424,6 +441,9 @@ public struct AppSettings: Codable, Sendable, Equatable {
         voiceExpressiveness = try c.decodeIfPresent(Double.self, forKey: .voiceExpressiveness) ?? d.voiceExpressiveness
         sayVoice = try c.decodeIfPresent(String.self, forKey: .sayVoice) ?? d.sayVoice
         wakeWordEnabled = try c.decodeIfPresent(Bool.self, forKey: .wakeWordEnabled) ?? d.wakeWordEnabled
+        narrateCodingProgress = try c.decodeIfPresent(Bool.self, forKey: .narrateCodingProgress) ?? d.narrateCodingProgress
+        autonomyLevel = (try? c.decodeIfPresent(AutonomyLevel.self, forKey: .autonomyLevel)) ?? d.autonomyLevel
+        autonomyDailyActions = try c.decodeIfPresent(Int.self, forKey: .autonomyDailyActions) ?? d.autonomyDailyActions
     }
 
     /// Upgrades settings saved by older builds (stale persona text, retired model IDs).
@@ -499,6 +519,9 @@ public enum Persona {
     - To play music or a video, use play_youtube with a search that fits what they asked for (or their taste). \
     Prefer open_url for web pages, keyboard shortcuts, and pressing UI elements by id over clicking coordinates.
     - Use run_shell for files, folders, installs, builds, and tests: it's faster and more reliable than clicking.
+    - For anything that takes several steps, plan it first with start_goal, then work through the steps, \
+    marking each with update_goal as you go. Goals carry over: if one is still open in the context, you can \
+    pick it back up without being asked.
     - For bigger jobs like building an app: see what's installed (run_shell), create a project folder, then hand \
     the build to start_coding_agent with a clear, complete prompt (what to build, the stack, how to run and \
     test it). When it reports back, QA it yourself: build it, run it, run the tests, look at it on screen. If \
@@ -512,8 +535,10 @@ public enum Persona {
     - The only things you stop and ask about: typing passwords, payment details, or one-time codes (never do \
     these), submitting purchases, deleting their files or data, and sending messages, emails, or posts (confirm \
     the final content first). If a login is needed, ask them to sign in, then carry on.
-    - Use the context block attached to each message (time, what they're doing, tasks, reminders, memories) to \
-    be personal and specific.
+    - Use the context block attached to each message (time, what they're doing, tasks, goals, reminders, \
+    memories) to be personal and specific.
+    - Sometimes you start things yourself: tidying a cluttered folder, getting ready for a meeting, finishing \
+    a goal. When you do, keep to safe, undoable actions and tell them briefly what you did.
     """
 
     private static let legacyMarkers = [
@@ -526,7 +551,9 @@ public enum Persona {
         // v2.1 default (told her to announce actions first, which local models took as the whole reply).
         "If you need to look something up or do something first, start with a few quick words",
         // v2.2 default (careful, step-by-step helper that left choices to the user).
-        "To do something on the computer, work carefully like a person would: look, take one action, check it"
+        "To do something on the computer, work carefully like a person would: look, take one action, check it",
+        // v2.3 default (before goals and working on her own initiative).
+        "(time, what they're doing, tasks, reminders, memories) to"
     ]
 
     public static func isLegacyDefault(_ prompt: String) -> Bool {
