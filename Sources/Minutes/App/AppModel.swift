@@ -69,6 +69,18 @@ final class AppModel: ObservableObject {
         )
     }()
 
+    /// Copies of her sent off to do background jobs in parallel.
+    private(set) lazy var clones: CloneManager = {
+        CloneManager(
+            registry: tools,
+            settingsProvider: { [weak self] in self?.settingsStore.settings ?? .default },
+            providerFactory: { [weak self] in
+                guard let self else { throw ChatProviderError.underlying("App not ready") }
+                return try self.makeProvider()
+            }
+        )
+    }()
+
     var onToggleChat: (() -> Void)?
     var onOpenSettings: (() -> Void)?
     var onCharacterPositionChanged: (() -> Void)?
@@ -144,6 +156,9 @@ final class AppModel: ObservableObject {
         }
         tools.register(computer.tools())
         tools.register(WorkTools.all(settings: { [weak self] in self?.settingsStore.settings ?? .default }, coding: coding))
+        tools.register(RoleTools.all(registry: tools))
+        tools.register(CloneTools.all(manager: clones, initiative: { [weak self] in self?.chatService.initiative ?? .user }))
+        wireClones()
         // A finished build comes back to her for QA, without waiting on the user.
         coding.onFinished = { [weak self] job in
             self?.progressPacers[job.id] = nil
@@ -304,13 +319,41 @@ final class AppModel: ObservableObject {
         autonomy.isBusy = { [weak self] in
             guard let self else { return true }
             return self.chatService.isStreaming || self.voiceInput.isListening || self.speech.isSpeaking
-                || self.coding.jobs.contains(where: \.isRunning)
+                || self.coding.jobs.contains(where: \.isRunning) || !self.clones.active.isEmpty
         }
         autonomy.inMeeting = { [weak self] in self?.proactive.inMeeting ?? false }
         autonomy.frontApp = { [weak self] in self?.usage.frontmostApp }
         autonomy.upcomingEvents = { [weak self] in self?.calendar.upcomingEvents() ?? [] }
         autonomy.appsUsedToday = { [weak self] in Set(self?.usage.today(top: 100).map(\.app) ?? []) }
         autonomy.start()
+    }
+
+    // MARK: - Roles & clones
+
+    private func wireClones() {
+        clones.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        tools.onRoleChanged = { [weak self] role in
+            self?.thoughts.add(.decided, "Switched to \(role.displayName) mode.")
+        }
+        // Clones are held to the same guardrail as her.
+        clones.toolPolicy = { [weak self] call, initiative in self?.chatService.toolPolicy?(call, initiative) }
+        clones.onProgress = { [weak self] clone, note, urgent in
+            guard let self, let note else { return }
+            self.thoughts.add(.progress, "\(clone.icon) \(clone.purpose): \(note)")
+            if urgent {
+                self.chatService.continueWork("Your clone [\(clone.shortID)] \(clone.purpose) reports (urgent): \(note)\nTell the user if it matters to them.")
+            }
+        }
+        clones.onFinished = { [weak self] clone in
+            guard let self else { return }
+            self.thoughts.add(.progress, "\(clone.icon) \(clone.purpose) \(clone.status.rawValue): \(clone.result?.prefix(140) ?? "")")
+            self.behavior.react(to: .backgroundJobFinished(success: clone.status == .finished))
+            // Stopped on purpose: nothing to follow up.
+            guard clone.status != .cancelled else { return }
+            self.chatService.continueWork(CloneManager.followUpNote(for: clone), initiative: clone.initiative)
+        }
     }
 
     /// Hands her a bigger objective from the Mind tab: she plans it as a goal and works it through.
@@ -514,7 +557,9 @@ final class AppModel: ObservableObject {
             goals: goalStore.open,
             memories: memoryStore.contextLines(query: lastUserText),
             inputMode: inputMode,
-            moodNote: currentTone(at: now).guidance
+            moodNote: currentTone(at: now).guidance,
+            role: tools.activeRole,
+            clones: clones.clones
         ).render()
     }
 
@@ -569,6 +614,7 @@ final class AppModel: ObservableObject {
     func stopEverything() {
         chatService.cancelStreaming()
         coding.cancelAll()
+        clones.cancelAll()
         progressPacers.removeAll()
         computer.endTask()
         speech.stop()

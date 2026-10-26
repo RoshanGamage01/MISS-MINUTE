@@ -88,11 +88,13 @@ public enum AutonomyPolicy {
     static let observeTools: Set<String> = [
         "look_at_screen", "read_screen", "list_tasks", "list_reminders", "recall", "get_calendar_events",
         "get_system_status", "get_activity_summary", "search_web", "read_webpage", "read_clipboard",
-        "list_shortcuts", "coding_job_status", "wait", "list_goals"
+        "list_shortcuts", "coding_job_status", "wait", "list_goals", "list_clones", "report_progress", "pause"
     ]
     static let reversibleTools: Set<String> = [
         "add_task", "update_task", "complete_task", "set_reminder", "start_timer", "cancel_reminder", "remember",
-        "start_goal", "update_goal", "finish_goal", "open_app", "focus_app", "open_url", "change_look"
+        "start_goal", "update_goal", "finish_goal", "open_app", "focus_app", "open_url", "change_look",
+        // A clone's own calls are checked one by one, so sending or stopping one is harmless.
+        "switch_role", "spawn_clone", "stop_clone"
     ]
     static let sensitiveTools: Set<String> = ["delete_task", "forget"]
     /// Tools that drive the mouse and keyboard; on her own she never fights the user for them.

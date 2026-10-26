@@ -23,6 +23,10 @@ public struct AgentContext: Sendable, Equatable {
     public var inputMode: String
     /// How to pitch the reply given the user's mood (`MoodTone.guidance`); nil when nothing stands out.
     public var moodNote: String?
+    /// Her current persona.
+    public var role: Role
+    /// Clones working in the background (and recently finished ones).
+    public var clones: [AgentClone]
 
     public init(
         now: Date = Date(),
@@ -40,7 +44,9 @@ public struct AgentContext: Sendable, Equatable {
         goals: [Goal] = [],
         memories: [String] = [],
         inputMode: String = "typed",
-        moodNote: String? = nil
+        moodNote: String? = nil,
+        role: Role = .general,
+        clones: [AgentClone] = []
     ) {
         self.now = now
         self.userName = userName
@@ -58,6 +64,8 @@ public struct AgentContext: Sendable, Equatable {
         self.memories = memories
         self.inputMode = inputMode
         self.moodNote = moodNote
+        self.role = role
+        self.clones = clones
     }
 
     public func render(calendar: Calendar = .current) -> String {
@@ -112,6 +120,13 @@ public struct AgentContext: Sendable, Equatable {
         if !openGoals.isEmpty {
             lines.append("Goals in progress:")
             lines.append(contentsOf: openGoals.prefix(5).map { "- \($0.summaryLine)" })
+        }
+        if role != .general {
+            lines.append("Your role: \(role.emoji) \(role.displayName) (\(role.summary)). switch_role to general for other work.")
+        }
+        if !clones.isEmpty {
+            lines.append("Your clones:")
+            lines.append(contentsOf: clones.suffix(5).map { "- \($0.summaryLine)" })
         }
         if !capabilityNotes.isEmpty {
             lines.append(contentsOf: capabilityNotes)

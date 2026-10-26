@@ -1374,3 +1374,157 @@ struct MissMinuteRenderer {
         }
     }
 }
+
+// MARK: - Clones
+
+/// Her clones, drawn as little holographic clocks orbiting her face on a tilted ring, each tethered to her by a
+/// dashed beam and labeled with what it's doing ("🔍 Searching the web…"). Lives in its own click-through
+/// window around hers, so the labels have room.
+struct CloneOrbitView: View {
+    var clones: [AgentClone]
+    var size: CGFloat
+    var skin: CharacterSkin
+    var bodyState: BodyState
+
+    /// The orbit window is this much bigger than her, centered on her face.
+    static func canvasSize(for size: CGFloat) -> CGSize {
+        CGSize(width: size * 3.4, height: size * 2.1)
+    }
+
+    var body: some View {
+        let canvas = Self.canvasSize(for: size)
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: clones.isEmpty)) { timeline in
+            Canvas { context, canvasSize in
+                guard !clones.isEmpty else { return }
+                let t = timeline.date.timeIntervalSinceReferenceDate
+                let renderer = CloneOrbitRenderer(
+                    t: t, clones: clones, size: size, canvas: canvasSize, skin: skin,
+                    palette: MinutePalette.current(bodyState.look, skin: skin, at: t)
+                )
+                renderer.draw(in: &context)
+            }
+        }
+        .frame(width: canvas.width, height: canvas.height)
+        .allowsHitTesting(false)
+        .accessibilityElement()
+        .accessibilityLabel(clones.isEmpty ? "" : "Clones: " + clones.map(\.label).joined(separator: ", "))
+    }
+}
+
+struct CloneOrbitRenderer {
+    let t: TimeInterval
+    let clones: [AgentClone]
+    let size: CGFloat
+    let canvas: CGSize
+    let skin: CharacterSkin
+    let palette: MinutePalette
+
+    /// Same unit as her renderer (face radius = 40 units).
+    var u: CGFloat { size * 1.45 / 145 }
+    var face: CGPoint { CGPoint(x: canvas.width / 2, y: canvas.height / 2) }
+
+    struct Slot {
+        var clone: AgentClone
+        var point: CGPoint
+        /// -1 behind her … 1 in front.
+        var depth: Double
+    }
+
+    /// Evenly spaced on a slowly turning ellipse; finished clones drift outward as they fade.
+    func slots() -> [Slot] {
+        let count = Double(clones.count)
+        return clones.enumerated().map { index, clone in
+            let angle = t * 0.45 + Double(index) * 2 * .pi / count
+            let done = clone.finishedAt.map { min(1, t - $0.timeIntervalSinceReferenceDate) } ?? 0
+            let rx = (78 + 12 * done) * Double(u)
+            let ry = (30 + 6 * done) * Double(u)
+            let point = CGPoint(x: face.x + CGFloat(cos(angle) * rx), y: face.y + CGFloat(sin(angle) * ry) - 6 * u)
+            return Slot(clone: clone, point: point, depth: sin(angle))
+        }
+    }
+
+    /// Running clones glow in her colors; finished ones turn green, and troubled ones red.
+    func tint(for clone: AgentClone) -> (core: Color, rim: Color) {
+        switch clone.status {
+        case .running: return (palette.glow, palette.accent)
+        case .finished: return (Color(hex: 0x3FD68A), Color(hex: 0xB8F5D2))
+        case .failed: return (Color(hex: 0xFF5A4E), Color(hex: 0xFFC2B8))
+        case .cancelled: return (Color(hex: 0x9A8F86), Color(hex: 0xD6CFC8))
+        }
+    }
+
+    func fade(for clone: AgentClone) -> Double {
+        guard let finished = clone.finishedAt else { return 1 }
+        let age = t - finished.timeIntervalSinceReferenceDate
+        return max(0, min(1, 1 - (age - CloneOrbitModel.linger + 1.2) / 1.2))
+    }
+
+    func draw(in context: inout GraphicsContext) {
+        // Back half first, so the ones in front overlap them.
+        let ordered = slots().sorted { $0.depth < $1.depth }
+        for slot in ordered { drawTether(slot, in: &context) }
+        for slot in ordered { drawClone(slot, in: &context) }
+    }
+
+    func drawTether(_ slot: Slot, in context: inout GraphicsContext) {
+        var beam = Path()
+        beam.move(to: face)
+        let control = CGPoint(x: (face.x + slot.point.x) / 2, y: min(face.y, slot.point.y) - 14 * u)
+        beam.addQuadCurve(to: slot.point, control: control)
+        let alpha = (0.25 + 0.2 * (slot.depth + 1) / 2) * fade(for: slot.clone)
+        context.stroke(beam, with: .color(tint(for: slot.clone).rim.opacity(alpha)),
+                       style: StrokeStyle(lineWidth: 1 * u, lineCap: .round, dash: [3 * u, 4 * u],
+                                          dashPhase: CGFloat(-t * 18) * u))
+    }
+
+    func drawClone(_ slot: Slot, in context: inout GraphicsContext) {
+        let clone = slot.clone
+        let (core, rim) = tint(for: clone)
+        let scale = CGFloat(0.82 + 0.18 * slot.depth)
+        let opacity = (0.6 + 0.4 * (slot.depth + 1) / 2) * fade(for: clone)
+        guard opacity > 0.01 else { return }
+        let r = 10 * u * scale
+        let c = slot.point
+        let flicker = skin == .hologram ? 0.88 + 0.08 * sin(t * 11 + Double(clone.id)) : 1
+
+        var layer = context
+        layer.opacity = opacity * flicker
+        // Glow.
+        var glow = layer
+        glow.addFilter(.blur(radius: 5 * u))
+        glow.fill(Path(ellipseIn: CGRect(x: c.x - r * 1.3, y: c.y - r * 1.3, width: r * 2.6, height: r * 2.6)),
+                  with: .color(core.opacity(0.55)))
+        // A tiny clock face: translucent dial, dashed rim (a copy, not the real her), spinning hands.
+        let dial = Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2))
+        layer.fill(dial, with: .radialGradient(
+            Gradient(colors: [Color(hex: 0xFFF4E3).opacity(0.55), core.opacity(0.55)]),
+            center: c, startRadius: 0, endRadius: r))
+        layer.stroke(dial, with: .color(rim), style: StrokeStyle(lineWidth: 1.4 * u, dash: [2.6 * u, 1.6 * u],
+                                                                 dashPhase: CGFloat(t * 6) * u))
+        let speed = clone.isRunning ? 4.0 : 0
+        for (length, rate, width) in [(0.75, 1.0, 1.3), (0.5, 1 / 12.0, 1.8)] as [(CGFloat, Double, CGFloat)] {
+            let a = t * speed * rate + Double(clone.id) - .pi / 2
+            var hand = Path()
+            hand.move(to: c)
+            hand.addLine(to: CGPoint(x: c.x + CGFloat(cos(a)) * r * length, y: c.y + CGFloat(sin(a)) * r * length))
+            layer.stroke(hand, with: .color(palette.line.opacity(0.85)), style: StrokeStyle(lineWidth: width * u, lineCap: .round))
+        }
+        layer.fill(Path(ellipseIn: CGRect(x: c.x - 1.4 * u, y: c.y - 1.4 * u, width: 2.8 * u, height: 2.8 * u)),
+                   with: .color(rim))
+
+        // Label: a small holo-tag under the clock.
+        let fontSize = max(9, 7.2 * u * scale)
+        let text = layer.resolve(
+            Text(clone.label)
+                .font(.system(size: fontSize, weight: .semibold, design: .rounded))
+                .foregroundColor(Color(hex: 0xFFF4E3))
+        )
+        let measured = text.measure(in: CGSize(width: canvas.width, height: 40))
+        let tag = CGRect(x: c.x - measured.width / 2 - 5 * u, y: c.y + r + 3 * u,
+                         width: measured.width + 10 * u, height: measured.height + 3 * u)
+        let capsule = Path(roundedRect: tag, cornerRadius: tag.height / 2)
+        layer.fill(capsule, with: .color(Color(hex: 0x1C0A03).opacity(0.62)))
+        layer.stroke(capsule, with: .color(core.opacity(0.9)), lineWidth: 0.9 * u)
+        layer.draw(text, at: CGPoint(x: tag.midX, y: tag.midY), anchor: .center)
+    }
+}

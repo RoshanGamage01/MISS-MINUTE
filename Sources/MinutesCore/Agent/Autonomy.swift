@@ -3,10 +3,12 @@ import Foundation
 /// Keeps a delegated task going until it's really done: she checks her work before wrapping up, and makes
 /// ordinary choices herself instead of handing them back ("What would you like to play?").
 public enum Autonomy {
-    /// Tools that change something. After the last one, she should look before saying it's done.
+    /// Tools that change something in a way their result can't confirm. After the last one, she should look
+    /// before saying it's done. Low-risk launches (open_app, open_url, focus_app, play_youtube, scroll) report
+    /// their own success, so she moves on without a second look.
     public static let actionTools: Set<String> = [
-        "open_app", "open_url", "focus_app", "click", "press_element", "set_text", "type_text", "press_keys",
-        "scroll", "drag", "browser", "run_applescript", "run_shortcut", "play_youtube", "create_calendar_event"
+        "click", "press_element", "set_text", "type_text", "press_keys",
+        "drag", "browser", "run_applescript", "run_shortcut", "create_calendar_event"
     ]
     /// Tools whose result shows what actually happened (a shell command's output is its own check).
     public static let checkTools: Set<String> = ["look_at_screen", "read_screen", "run_shell", "coding_job_status"]
@@ -17,7 +19,7 @@ public enum Autonomy {
         return !toolsUsed[(lastAction + 1)...].contains(where: checkTools.contains)
     }
 
-    public static let checkNudge = "(Note from the app, not the user: before you wrap up, double-check it actually worked: look at the screen, read the page, or run a quick check. If anything is off or unfinished, fix it and keep going until the request is fully done. If it's done, just reply in one short sentence.)"
+    public static let checkNudge = "(Note from the app, not the user: that last step went through the UI, so take one quick look (or run a quick command) to confirm it worked. If anything is off or unfinished, fix it and keep going. If it's done, just reply in one short sentence.)"
 
     /// Asking before these is right; for everything else she picks herself.
     private static let sensitive = try! NSRegularExpression(pattern:

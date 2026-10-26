@@ -10,7 +10,7 @@ enum WorkTools {
         return [
             AgentTool(spec: .object(
                 "run_shell",
-                "Run a zsh command on this Mac and get its output: make folders and files, check what's installed (which, --version, ls /Applications), install packages, build, run tests, git. Runs in the user's login shell. \(projectsHint)",
+                "Run a zsh command on this Mac and get its output: make folders and files, check what's installed (which, --version, ls /Applications), install packages, build, run tests, git. Chain related steps into one command (&&, loops, find -exec, sed -i '') instead of many calls. Runs in the user's login shell. \(projectsHint)",
                 properties: [
                     "command": ["type": "string"],
                     "cwd": ["type": "string", "description": "Working directory (default: home). ~ is fine."],

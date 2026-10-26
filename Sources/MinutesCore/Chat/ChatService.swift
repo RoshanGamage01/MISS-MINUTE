@@ -35,7 +35,8 @@ public final class ChatService: ObservableObject {
     public static let instantTools: Set<String> = [
         "add_task", "update_task", "complete_task", "delete_task", "list_tasks",
         "set_reminder", "list_reminders", "cancel_reminder", "start_timer",
-        "remember", "recall", "forget", "start_goal", "update_goal", "list_goals", "finish_goal"
+        "remember", "recall", "forget", "start_goal", "update_goal", "list_goals", "finish_goal",
+        "switch_role", "spawn_clone", "list_clones", "stop_clone"
     ]
     /// Spoken the moment a slower tool starts, if she hasn't said anything yet.
     public static let acknowledgements = ["Sure thing, one sec!", "On it, sugar!", "One moment, hon!", "Let me take a look!"]
@@ -277,7 +278,7 @@ public final class ChatService: ObservableObject {
                     let request = AgentRequest(
                         messages: Array(all[startIndex...]),
                         model: settings.model,
-                        systemPrompt: settings.personaPrompt,
+                        systemPrompt: Self.systemPrompt(settings.personaPrompt, role: self.tools.activeRole),
                         tools: self.tools.specs,
                         depth: settings.responseDepth,
                         allowWebSearch: allowSearch
@@ -525,6 +526,11 @@ public final class ChatService: ObservableObject {
         }
     }
 
+    /// Her persona prompt plus whatever the active role adds.
+    public static func systemPrompt(_ persona: String, role: Role) -> String {
+        role.promptModifier.isEmpty ? persona : persona + "\n\n" + role.promptModifier
+    }
+
     public static func statusLine(for call: ToolCall) -> String {
         switch call.name {
         case "add_task", "update_task", "complete_task", "delete_task", "list_tasks": return "Updating your tasks…"
@@ -542,6 +548,13 @@ public final class ChatService: ObservableObject {
         case "change_look": return "Changing my look…"
         case "start_goal": return "Planning it out…"
         case "update_goal", "list_goals", "finish_goal": return "Ticking off steps…"
+        case "search_web": return "Searching the web…"
+        case "read_webpage", "browser": return "Reading a page…"
+        case "look_at_screen", "read_screen": return "Looking at the screen…"
+        case "run_applescript": return "Running a script…"
+        case "switch_role": return "Changing hats…"
+        case "spawn_clone": return "Sending out a clone…"
+        case "list_clones", "stop_clone": return "Checking on my clones…"
         default: return "Working on it…"
         }
     }

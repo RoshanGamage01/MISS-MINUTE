@@ -14,6 +14,12 @@ She doesn't only wait for commands. About once a minute, when you aren't talking
 - **Seeing her think.** The **Mind** tab shows your open goals with step checklists, plus a live stream of what she noticed, weighed, decided, did, and held back from. Every line is also written to `~/Library/Application Support/Minutes/thoughts.log`. Open goals appear in the menu-bar menu too.
 - **You come first.** She only starts when she isn't talking, listening, or running a build. Any message from you pauses her work, and she won't touch the mouse or keyboard until you've been idle for 2 minutes.
 
+## Roles and clones
+
+- **Roles.** She can change hats with `switch_role`: **Developer** (shell, coding agent, screen, web docs), **Secretary** (tasks, reminders, calendar), **System-Admin** (shell, AppleScript, system status), **Researcher** (search and reading), or **General** (everything, the default). A role narrows the tools the model sees and adds a line to her prompt, so turns are faster and more focused. Asking for a tool outside the role gets a hint to switch back.
+- **Clones.** For a self-contained job that would otherwise keep you waiting, she sends out a clone with `spawn_clone(purpose, task, tools)`, such as a Web-Scraper, a File-Watcher, or a Price-Checker. Each clone is a lightweight agent that runs in parallel with only the tools she gave it. Clones never use the mouse or keyboard and can't spawn more clones. They post updates with `report_progress` and can wait between checks with `pause`. When a clone finishes, its report comes back to her and she tells you the result. Up to 3 run at once; see them with `list_clones` and call them back with `stop_clone`.
+- **Seeing them.** Each running clone orbits her face as a small dashed-rim holographic clock, tethered to her by a beam and labeled with what it's doing ("🔍 Searching the web…"). Finished clones turn green (red if they failed) and fade out after a few seconds.
+
 ## Watching background coding jobs
 
 When she hands a build to Claude Code or Cursor's agent, the job's live `stream-json` output is turned into short steps ("Reading Mood.swift", "Writing tests for Mood.swift", "Fixing Autonomy.swift", "Running the tests"):
@@ -140,6 +146,7 @@ Sources/MinutesCore/            Testable core (no AppKit)
     AutonomyPolicy              Risk of each tool call; what she may do unasked (enforced before every call)
     Initiative                  World snapshot → opportunities → scored decision (act / offer / skip)
     Goals, ThoughtLog           Multi-step goals + goal tools; her inner monologue and thoughts.log
+    Roles, Clones               Role personas (tool filters + prompt modifiers); CloneManager for parallel background agents
   Chat/ChatService.swift        The agent loop: stream → tool calls → results → … → spoken reply
   Providers/                    Anthropic (raw SSE + tool use), OpenAI-compatible, Ollama
   Tasks/ Memory/ Reminders/     Persistent stores
