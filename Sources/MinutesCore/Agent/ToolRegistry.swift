@@ -45,6 +45,11 @@ public struct AgentTool {
 public final class ToolRegistry {
     private var tools: [String: AgentTool] = [:]
     private var order: [String] = []
+    /// Her current persona; it decides which tools the model sees and may call.
+    public var activeRole: Role = .general {
+        didSet { if activeRole != oldValue { onRoleChanged?(activeRole) } }
+    }
+    public var onRoleChanged: ((Role) -> Void)?
 
     public init() {}
 
@@ -57,17 +62,44 @@ public final class ToolRegistry {
         list.forEach(register)
     }
 
-    /// Stable, ordered tool list (stable order keeps the prompt cache warm).
-    public var specs: [ToolSpec] { order.compactMap { tools[$0]?.spec } }
+    /// Stable, ordered list of the tools the active role allows (stable order keeps the prompt cache warm).
+    public var specs: [ToolSpec] { specs(for: activeRole) }
 
+    /// Every registered tool, whatever the role.
+    public var allSpecs: [ToolSpec] { order.compactMap { tools[$0]?.spec } }
+
+    public var names: [String] { order }
+
+    public func specs(for role: Role) -> [ToolSpec] {
+        order.filter(role.allows).compactMap { tools[$0]?.spec }
+    }
+
+    /// The named tools, in registry order (clones carry a subset).
+    public func specs(named allowed: Set<String>) -> [ToolSpec] {
+        order.filter(allowed.contains).compactMap { tools[$0]?.spec }
+    }
+
+    /// Runs a call, limited to what the active role allows.
     public func execute(_ call: ToolCall) async -> ToolOutcome {
+        await execute(call, allowed: Set(order.filter(activeRole.allows)), roleName: activeRole.displayName)
+    }
+
+    /// Runs a call, limited to `allowed` tool names (a role or a clone's subset).
+    public func execute(_ call: ToolCall, allowed: Set<String>, roleName: String? = nil) async -> ToolOutcome {
         if let raw = call.arguments["__invalid_json"]?.stringValue {
             return .failure("INVALID_JSON: the arguments for \(call.name) were not valid JSON (\(raw.prefix(200))). Call the tool again with valid JSON.")
         }
+        let available = order.filter(allowed.contains)
         // Self-healing: a slightly-wrong tool name or argument key is repaired instead of bounced back.
-        guard let name = tools[call.name] != nil ? call.name : ToolRecovery.resolveName(call.name, among: order),
+        guard let name = available.contains(call.name) ? call.name : ToolRecovery.resolveName(call.name, among: available),
               let tool = tools[name] else {
-            return .failure("Unknown tool \(call.name). Available: \(order.joined(separator: ", ")).")
+            if tools[call.name] != nil, let roleName {
+                return .failure("\(call.name) isn't available in the \(roleName) role. Call switch_role first (general has every tool).")
+            }
+            if tools[call.name] != nil {
+                return .failure("\(call.name) isn't one of your tools. Available: \(available.joined(separator: ", ")).")
+            }
+            return .failure("Unknown tool \(call.name). Available: \(available.joined(separator: ", ")).")
         }
         let arguments = ToolRecovery.repairArguments(call.arguments, spec: tool.spec) ?? call.arguments
         var outcome = await run(tool, name: name, arguments: arguments)

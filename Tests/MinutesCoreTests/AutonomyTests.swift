@@ -3,7 +3,9 @@ import XCTest
 
 final class AutonomyTests: XCTestCase {
     func testChecksAfterActingWithoutLooking() {
-        XCTAssertTrue(Autonomy.needsCheck(toolsUsed: ["open_url"]))
+        XCTAssertTrue(Autonomy.needsCheck(toolsUsed: ["type_text"]))
+        XCTAssertFalse(Autonomy.needsCheck(toolsUsed: ["open_url"]), "low-risk launches confirm themselves")
+        XCTAssertFalse(Autonomy.needsCheck(toolsUsed: ["open_app", "play_youtube"]))
         XCTAssertTrue(Autonomy.needsCheck(toolsUsed: ["look_at_screen", "click"]))
         XCTAssertFalse(Autonomy.needsCheck(toolsUsed: ["click", "look_at_screen"]))
         XCTAssertFalse(Autonomy.needsCheck(toolsUsed: ["run_shell"]), "a command's output is its own check")
@@ -47,6 +49,9 @@ final class AutonomyTests: XCTestCase {
         settings.migrateLegacyValues()
         XCTAssertEqual(settings.personaPrompt, Persona.defaultPrompt)
         XCTAssertFalse(Persona.isLegacyDefault(Persona.defaultPrompt))
+        var v24 = AppSettings(personaPrompt: "…- Work like a person would: look, take an action, check it worked, and keep going until…")
+        v24.migrateLegacyValues()
+        XCTAssertEqual(v24.personaPrompt, Persona.defaultPrompt, "the check-everything default upgrades to fast execution")
     }
 
     private func tempStore<T>() -> JSONFileStore<T> {

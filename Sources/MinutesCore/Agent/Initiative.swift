@@ -350,7 +350,7 @@ public struct InitiativeDecider: Sendable, Codable, Equatable {
 public enum InitiativeNotes {
     public static let skipToken = "SKIP"
 
-    private static let ground = "You're doing this on your own initiative, not because they asked, so stay within safe, undoable actions: never delete, send, buy, or overwrite anything. If a step needs that, mark it needs_user with update_goal. Don't take over the mouse or keyboard while they're using the computer; prefer commands. Call update_goal as each step starts and finishes, and verify before marking a step done."
+    private static let ground = "You're doing this on your own initiative, not because they asked, so stay within safe, undoable actions: never delete, send, buy, or overwrite anything. If a step needs that, mark it needs_user with update_goal. Don't take over the mouse or keyboard while they're using the computer; prefer commands. Call update_goal as each step starts and finishes. A tool's own result is enough to mark a routine step done; only look again when the outcome is unclear."
 
     public static func kickoff(_ opportunity: Opportunity, goal: Goal) -> String {
         let plan = goal.steps.map { "\($0.id). \($0.title)" }.joined(separator: "\n")
@@ -368,7 +368,7 @@ public enum InitiativeNotes {
         return """
         (Note from the app, not the user: picking up goal [\(goal.shortID)] "\(goal.objective)" again. \(whose)
         \(steps)
-        Carry on from the next unfinished step. \(goal.origin == .user ? "Call update_goal as each step starts and finishes, and verify before marking a step done." : ground) When it's all done, finish_goal and tell them in one short sentence. If you're blocked, mark the step needs_user and ask them for exactly what's needed.\(goal.origin == .user ? "" : " If there's nothing useful to do right now, reply with exactly \(skipToken).")))
+        Carry on from the next unfinished step. \(goal.origin == .user ? "Call update_goal as each step starts and finishes. A tool's own result is enough to mark a routine step done; only look again when the outcome is unclear." : ground) When it's all done, finish_goal and tell them in one short sentence. If you're blocked, mark the step needs_user and ask them for exactly what's needed.\(goal.origin == .user ? "" : " If there's nothing useful to do right now, reply with exactly \(skipToken).")))
         """
     }
 

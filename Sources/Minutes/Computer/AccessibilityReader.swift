@@ -137,6 +137,37 @@ final class AccessibilityReader {
         return string(window, kAXTitleAttribute)
     }
 
+    /// The app's focused (or main) window in global top-left coordinates, the same space CGEvents use.
+    static func frontWindowFrame(of app: NSRunningApplication) -> CGRect? {
+        guard AXIsProcessTrusted() else { return nil }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        guard let window = attribute(root, kAXFocusedWindowAttribute) as AXUIElement?
+                ?? attribute(root, kAXMainWindowAttribute) as AXUIElement? else { return nil }
+        return frame(of: window)
+    }
+
+    /// Where the scrollable area under `point` is scrolled to (0 = top/left, 1 = bottom/right), if it says.
+    /// Lets the scroll tool tell whether anything actually moved.
+    static func scrollPosition(at point: CGPoint) -> (vertical: Double?, horizontal: Double?)? {
+        guard AXIsProcessTrusted() else { return nil }
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &hit) == .success,
+              var element = hit else { return nil }
+        for _ in 0..<25 {
+            if string(element, kAXRoleAttribute) == "AXScrollArea" {
+                let area = element
+                let bar = { (name: String) -> Double? in
+                    (Self.attribute(area, name) as AXUIElement?).flatMap { (Self.attribute($0, kAXValueAttribute) as NSNumber?)?.doubleValue }
+                }
+                let position = (bar(kAXVerticalScrollBarAttribute), bar(kAXHorizontalScrollBarAttribute))
+                if position.0 != nil || position.1 != nil { return position }
+            }
+            guard let parent = attribute(element, kAXParentAttribute) as AXUIElement? else { return nil }
+            element = parent
+        }
+        return nil
+    }
+
     static func selectedText(of app: NSRunningApplication) -> String? {
         let root = AXUIElementCreateApplication(app.processIdentifier)
         guard let focused = attribute(root, kAXFocusedUIElementAttribute) as AXUIElement? else { return nil }
@@ -157,6 +188,10 @@ final class AccessibilityReader {
     }
 
     static func center(of element: AXUIElement) -> CGPoint? {
+        frame(of: element).map { CGPoint(x: $0.midX, y: $0.midY) }
+    }
+
+    static func frame(of element: AXUIElement) -> CGRect? {
         guard let positionValue = attribute(element, kAXPositionAttribute) as AXValue?,
               let sizeValue = attribute(element, kAXSizeAttribute) as AXValue? else { return nil }
         var position = CGPoint.zero
@@ -164,7 +199,7 @@ final class AccessibilityReader {
         AXValueGetValue(positionValue, .cgPoint, &position)
         AXValueGetValue(sizeValue, .cgSize, &size)
         guard size.width > 0, size.height > 0 else { return nil }
-        return CGPoint(x: position.x + size.width / 2, y: position.y + size.height / 2)
+        return CGRect(origin: position, size: size)
     }
 
     private static func attribute<T>(_ element: AXUIElement, _ name: String) -> T? {

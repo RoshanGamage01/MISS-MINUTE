@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import MinutesCore
 
@@ -6,6 +7,9 @@ import MinutesCore
 final class CharacterWindowController: NSObject {
     private weak var appModel: AppModel?
     private var window: NSWindow?
+    /// A click-through window around hers where her clones orbit.
+    private var orbitWindow: NSWindow?
+    private var orbitModel: CloneOrbitModel?
     var onCharacterClicked: (() -> Void)?
     var onMoved: (() -> Void)?
     var onDragBegan: (() -> Void)?
@@ -60,6 +64,42 @@ final class CharacterWindowController: NSObject {
         self.window = window
         reposition()
         window.orderFrontRegardless()
+        showOrbit(around: window, appModel: appModel)
+    }
+
+    /// Her clones circle her in a bigger, transparent window that moves with hers (a child window follows its
+    /// parent), so labels aren't clipped by her own canvas.
+    private func showOrbit(around parent: NSWindow, appModel: AppModel) {
+        let model = CloneOrbitModel(manager: appModel.clones)
+        let root = CloneOrbitRootView(model: model, settingsStore: appModel.settingsStore, bodyState: appModel.behavior.body)
+        let orbit = NSWindow(contentRect: NSRect(origin: .zero, size: orbitSize), styleMask: [.borderless],
+                             backing: .buffered, defer: false)
+        orbit.isOpaque = false
+        orbit.backgroundColor = .clear
+        orbit.hasShadow = false
+        orbit.level = .floating
+        orbit.ignoresMouseEvents = true
+        orbit.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        orbit.contentView = NSHostingView(rootView: root)
+        parent.addChildWindow(orbit, ordered: .above)
+        orbitWindow = orbit
+        orbitModel = model
+        layoutOrbit()
+    }
+
+    private var orbitSize: NSSize {
+        let canvas = CloneOrbitView.canvasSize(for: CGFloat(appModel?.settingsStore.settings.characterSize ?? 150))
+        return NSSize(width: canvas.width, height: canvas.height)
+    }
+
+    /// Centers the orbit on her face (41% down her canvas).
+    private func layoutOrbit() {
+        guard let window, let orbitWindow else { return }
+        let frame = window.frame
+        let size = orbitSize
+        let faceY = frame.maxY - frame.height * 0.41
+        orbitWindow.setFrame(NSRect(x: frame.midX - size.width / 2, y: faceY - size.height / 2,
+                                    width: size.width, height: size.height), display: false)
     }
 
     private var contentSize: NSSize {
@@ -87,6 +127,7 @@ final class CharacterWindowController: NSObject {
             origin = NSPoint(x: visible.minX + margin, y: visible.maxY - size.height - margin)
         }
         window.setFrameOrigin(origin)
+        layoutOrbit()
         onMoved?()
     }
 
@@ -98,6 +139,7 @@ final class CharacterWindowController: NSObject {
     /// Moves her window (used by the behavior engine).
     func setOrigin(_ origin: NSPoint) {
         window?.setFrameOrigin(origin)
+        layoutOrbit()
         onMoved?()
     }
 
@@ -126,7 +168,51 @@ final class CharacterWindowController: NSObject {
             frame.origin.y = min(max(frame.origin.y, visible.minY), visible.maxY - frame.height)
         }
         window.setFrameOrigin(frame.origin)
+        layoutOrbit()
         onMoved?()
+    }
+}
+
+/// Which clones are on show: every running one, plus finished ones for a few seconds so she can see them land.
+@MainActor
+final class CloneOrbitModel: ObservableObject {
+    nonisolated static let linger: TimeInterval = 5
+    @Published private(set) var shown: [AgentClone] = []
+    private var cancellable: AnyCancellable?
+    private var expiry: Task<Void, Never>?
+
+    init(manager: CloneManager) {
+        cancellable = manager.$clones.sink { [weak self] clones in self?.update(clones) }
+    }
+
+    private func update(_ clones: [AgentClone]) {
+        let now = Date()
+        shown = clones.filter { clone in
+            clone.isRunning || clone.finishedAt.map { now.timeIntervalSince($0) < Self.linger } == true
+        }
+        // Clear finished ones once they've lingered (nothing else would redraw the list).
+        expiry?.cancel()
+        guard let next = shown.compactMap(\.finishedAt).map({ $0.addingTimeInterval(Self.linger) }).min() else { return }
+        expiry = Task { [weak self, clones] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0.1, next.timeIntervalSinceNow) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.update(clones)
+        }
+    }
+}
+
+private struct CloneOrbitRootView: View {
+    @ObservedObject var model: CloneOrbitModel
+    @ObservedObject var settingsStore: SettingsStore
+    let bodyState: BodyState
+
+    var body: some View {
+        CloneOrbitView(
+            clones: model.shown,
+            size: CGFloat(settingsStore.settings.characterSize),
+            skin: settingsStore.settings.characterSkin,
+            bodyState: bodyState
+        )
     }
 }
 

@@ -57,18 +57,23 @@ enum InputController {
         CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: end, mouseButton: .left)?.post(tap: .cghidEventTap)
     }
 
-    /// Scrolls by "notches" (positive = down/right).
-    static func scroll(dy: Int, dx: Int, at point: CGPoint?) {
-        if let point { move(to: point); usleep(40_000) }
+    /// Scrolls by "notches" (positive = down/right) over `point`. Scroll events go to whatever window is under
+    /// the pointer, so the pointer is moved there first and every event is stamped with that spot.
+    static func scroll(dy: Int, dx: Int, at point: CGPoint) {
+        move(to: point)
+        usleep(60_000)
+        // Pixel units scroll the same distance in every app; line units are ignored or tiny in some web views.
+        let step: Int32 = 80
         for _ in 0..<max(abs(dy), abs(dx)) {
             let event = CGEvent(
-                scrollWheelEvent2Source: nil, units: .line, wheelCount: 2,
-                wheel1: Int32(dy == 0 ? 0 : (dy > 0 ? -3 : 3)),
-                wheel2: Int32(dx == 0 ? 0 : (dx > 0 ? -3 : 3)),
+                scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
+                wheel1: dy == 0 ? 0 : (dy > 0 ? -step : step),
+                wheel2: dx == 0 ? 0 : (dx > 0 ? -step : step),
                 wheel3: 0
             )
+            event?.location = point
             event?.post(tap: .cghidEventTap)
-            usleep(25_000)
+            usleep(30_000)
         }
     }
 

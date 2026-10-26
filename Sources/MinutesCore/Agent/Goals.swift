@@ -230,7 +230,7 @@ public enum GoalTools {
         return [
             AgentTool(spec: .object(
                 "start_goal",
-                "Plan a multi-step objective before working on it (\"get my Downloads folder organized\", \"set up a Python project and get its tests passing\", \"prepare for tomorrow's 10am meeting\"). Break it into 2–8 concrete, checkable steps in order. Then work through them, calling update_goal as each starts and finishes. Skip this for one-step requests.",
+                "Plan a multi-step objective before working on it (\"get my Downloads folder organized\", \"set up a Python project and get its tests passing\", \"prepare for tomorrow's 10am meeting\"). Break it into 2–8 concrete, checkable steps in order. Then work through them, calling update_goal as each starts and finishes. Skip this for one-step requests and for routine jobs you already know how to do: just do those.",
                 properties: [
                     "objective": ["type": "string", "description": "The outcome, in a short phrase."],
                     "steps": ["type": "array", "items": ["type": "string"], "description": "Concrete actions in order, each short and checkable."]

@@ -64,9 +64,9 @@ final class FollowThroughTests: XCTestCase {
         await fulfillment(of: [replied], timeout: 5)
 
         XCTAssertTrue(ran, "the nudge got the tool called")
-        // open_url acted without looking, so she's asked to check once more before finishing.
-        XCTAssertEqual(provider.requests.count, 4)
-        XCTAssertEqual(chat.conversation.messages.filter { $0.isHidden == true }.count, 2)
+        // open_url confirms itself, so there's no extra check round after it.
+        XCTAssertEqual(provider.requests.count, 3)
+        XCTAssertEqual(chat.conversation.messages.filter { $0.isHidden == true }.count, 1)
         XCTAssertFalse(chat.visibleMessages.contains { $0.isHidden == true })
     }
 

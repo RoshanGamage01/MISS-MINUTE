@@ -56,6 +56,16 @@ final class ComputerController {
         onActionPoint?(CGPoint(x: point.x, y: mainHeight - point.y))
     }
 
+    /// Middle of the target app's window, so a scroll lands in the app she's working in and not under her or
+    /// wherever the pointer was left.
+    private func frontWindowCenter() throws -> CGPoint {
+        if let app = targetApp, let frame = AccessibilityReader.frontWindowFrame(of: app) {
+            return CGPoint(x: frame.midX, y: frame.midY)
+        }
+        guard let screen = NSScreen.screens.first?.frame else { throw ToolError("Couldn't find a window to scroll.") }
+        return CGPoint(x: screen.midX, y: screen.midY)
+    }
+
     func frontSummary() -> (app: String?, title: String?) {
         guard let app = targetApp else { return (nil, nil) }
         return (app.localizedName, AccessibilityReader.frontWindowTitle(of: app))
@@ -228,27 +238,49 @@ final class ComputerController {
 
             AgentTool(spec: .object(
                 "scroll",
-                "Scroll the front window. Optional x/y (screenshot pixels) to scroll a specific area.",
+                "Scroll the front app's window (its middle, by default). Pass x/y from the latest look_at_screen to scroll a specific panel or list instead. Each notch is about two lines; 10 is roughly a screenful. The result says if nothing moved.",
                 properties: [
                     "direction": ["type": "string", "enum": ["up", "down", "left", "right"]],
-                    "amount": ["type": "integer", "description": "1–15 notches, default 5."],
+                    "amount": ["type": "integer", "description": "1–30 notches, default 8."],
                     "x": ["type": "number"], "y": ["type": "number"]
                 ],
                 required: ["direction"]
             )) { [unowned self] args in
                 let direction = try args.requiredString("direction")
-                let amount = max(1, min(15, args["amount"]?.intValue ?? 5))
-                try await self.authorize("scroll")
-                var point: CGPoint?
-                if let shot = self.lastShot, let x = args["x"]?.doubleValue, let y = args["y"]?.doubleValue {
+                guard ["up", "down", "left", "right"].contains(direction) else { throw ToolError("direction must be up, down, left, or right.") }
+                let amount = max(1, min(30, args["amount"]?.intValue ?? 8))
+                let point: CGPoint
+                if let x = args["x"]?.doubleValue, let y = args["y"]?.doubleValue {
+                    guard let shot = self.lastShot else { throw ToolError("x/y are screenshot pixels: call look_at_screen first, or leave them out to scroll the front window.") }
                     point = shot.screenPoint(x: x, y: y)
+                } else {
+                    point = try self.frontWindowCenter()
                 }
-                if let point { self.reportActionPoint(point) }
+                try await self.authorize("scroll")
+                self.reportActionPoint(point)
+                let before = AccessibilityReader.scrollPosition(at: point)
                 let dy = direction == "down" ? amount : (direction == "up" ? -amount : 0)
                 let dx = direction == "right" ? amount : (direction == "left" ? -amount : 0)
                 InputController.scroll(dy: dy, dx: dx, at: point)
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                return .ok("Scrolled \(direction).", summary: nil)
+                try? await Task.sleep(nanoseconds: 350_000_000)
+                let app = self.targetApp?.localizedName ?? "the front window"
+                guard let before, let after = AccessibilityReader.scrollPosition(at: point) else {
+                    return .ok("Scrolled \(direction) in \(app).", summary: "Scrolled \(direction)")
+                }
+                let vertical = direction == "up" || direction == "down"
+                let from = vertical ? before.vertical : before.horizontal
+                let to = vertical ? after.vertical : after.horizontal
+                guard let from, let to else { return .ok("Scrolled \(direction) in \(app).", summary: "Scrolled \(direction)") }
+                if abs(to - from) < 0.001 {
+                    let atEdge = (direction == "down" || direction == "right") ? to > 0.995 : to < 0.005
+                    return ToolOutcome(
+                        output: atEdge
+                            ? "Nothing moved: \(app) is already at the \(direction == "down" ? "bottom" : direction == "up" ? "top" : "edge")."
+                            : "Nothing moved in \(app). That spot may not scroll: look_at_screen and pass x/y over the list or page you want, or press_keys \"pagedown\" after clicking into it.",
+                        isError: !atEdge, summary: "Scroll didn't move")
+                }
+                return .ok("Scrolled \(direction) in \(app); now \(Int((to * 100).rounded()))% of the way \(vertical ? "down" : "across").",
+                           summary: "Scrolled \(direction)")
             },
 
             AgentTool(spec: .object(
